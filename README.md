@@ -1,6 +1,8 @@
 # KeyCat
 
-一只趴在键盘上的桌面猫：你打字它伸爪按键，动鼠标它扭头看，摸头会闭眼，没人理会睡着，被烦到会用尾巴捶桌。支持 macOS 13+ 和 Windows 10+，除了从 GitHub 检查和下载更新，不联网。
+一只趴在键盘上的桌面猫：你打字它伸爪按键，动鼠标它扭头看，摸头会闭眼，没人理会睡着，被烦到会用尾巴捶桌。支持 macOS 13+、Windows 10+ 和 **Linux（Fedora-KDE Wayland）**，除了从 GitHub 检查和下载更新，不联网。
+
+> 本仓库在原作者 **ElloboDK** 的开源项目 [KeyCat](https://github.com/ElloboDK/KeyCat) 基础上新增/重构了 `linux/` 原生宿主，添加了对 **Fedora-KDE Wayland** 的支持。
 
 ![KeyCat](docs/screenshots/keycat.gif)
 
@@ -19,6 +21,21 @@ curl -L -o /tmp/KeyCat-macOS.zip https://github.com/ElloboDK/KeyCat/releases/lat
 
 **Windows**：从 [Releases](https://github.com/ElloboDK/KeyCat/releases/latest) 下载 `KeyCat-Windows-Setup.exe` 运行。SmartScreen 拦截时点「更多信息 → 仍要运行」。安装包只有几 MB，猫由系统自带的 WebView2 绘制，极少数没装 WebView2 的 Win10 会在安装时自动下载。应用会自动更新，1.0.x 的旧版会自动升级过来并保留设置。
 
+**Linux（Fedora-KDE Wayland）**：采用原生 GTK3 + `gtk-layer-shell` + WebKitGTK 4.1 + `ksni`（KDE 托盘）+ `evdev` 实现，直接复用 `web/` 场景。可通过下方构建脚本生成并安装 `.rpm` 包（含 `/usr/share/applications/keycat.desktop` 应用菜单快捷方式与图标）。
+
+开启全局键鼠监听权限（读取 `/dev/input/event*`，修改后需重新登录生效）：
+
+```sh
+sudo usermod -aG input "$USER"
+```
+
+> **安全警告**：将账号加入 `input` 组后，当前用户下运行的**任意非沙盒程序**都可以直接读取 `/dev/input/event*`（绕过 Wayland 输入隔离，包括密码框中的按键）。请仅在受信任的个人设备上开启。
+>
+> 如需**关闭/撤销**该权限，随时执行以下命令并重新登录即可：
+> ```sh
+> sudo gpasswd -d "$USER" input
+> ```
+
 ## 使用
 
 猫住在菜单栏（Windows 是托盘）。右键猫或点图标打开菜单，可以换毛色和外观、调大小、设置多久睡着，在「调节反应…」里调整烦躁和好奇的灵敏度。按住猫身体可以拖动位置。直播或录屏时可以打开「鼠标穿透」，点击会直接落到猫下面的窗口，猫照常显示和反应，这时菜单只能从菜单栏或托盘图标打开。
@@ -34,6 +51,12 @@ sh mac/package.sh     # → dist/KeyCat-macOS.zip + .sha256 + latest-mac.json
 cd win && npm ci
 npm start             # 本机调试
 npm run dist          # → win/target/release/bundle/nsis/KeyCat_<版本>_x64-setup.exe（需 Rust 和 Node.js 22+，在 Windows 上执行）
+
+# Linux (Fedora-KDE Wayland)
+sudo dnf install gtk3-devel webkit2gtk4.1-devel gtk-layer-shell-devel rpm-build
+cd linux && cargo run --release   # 本机运行
+./linux/package-rpm.sh            # → dist/keycat-<版本>-1.<fc>.<arch>.rpm（含应用菜单快捷方式）
+sudo dnf install ./dist/keycat-*.rpm
 ```
 
 mac 版用 `signing/` 里自动生成的本地证书签名，这样重新编译后「输入监控」授权仍然有效。mac 自动更新只接受同一张证书签名的新版，所以发布包必须在有这个目录的机器上打，证书丢了已安装的 mac 版也收不到更新。Windows 自动更新的签名私钥也放在这里（`tauri-updater.key` 和它的密码 `tauri-updater.password`），内容同时存在仓库的 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 两个 Secret 里，公钥写在 `win/tauri.conf.json`。私钥丢了已安装的版本就收不到更新，要另外备份。不要提交这个目录。
@@ -51,7 +74,8 @@ mac 和 Windows 共用一个 Release，两边产物都要上传，否则另一�
 ```
 mac/    macOS 外壳（Swift）：浮窗、菜单、键鼠监听、自动更新、构建/签名/打包脚本
 win/    Windows 外壳（Tauri，Rust）：托盘、全局键鼠钩子、自动更新，页面由系统 WebView2 绘制
-web/    两端共用的 three.js 场景：猫、键盘、动作，tuning.js 是可调参数的唯一来源
+linux/  Linux 外壳（Fedora-KDE Wayland，Rust）：GTK3 + gtk-layer-shell 悬浮窗、evdev 全局键鼠监听、ksni 原生托盘、RPM 打包脚本
+web/    三端共用的 three.js 场景：猫、键盘、动作，tuning.js 是可调参数的唯一来源
 site/   下载页，由 .github/workflows/pages.yml 连同 web/ 一起部署到 GitHub Pages，每 3 小时刷新一次下载量
 tools/  开发用渲染脚本（serve.py 起本地服务，readme_gif.py 生成 README 动图，其余脚本在内置浏览器里截图对比）
 ```
