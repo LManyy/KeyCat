@@ -4,7 +4,8 @@
 ; administrators can change: the login task of 以管理员身份运行 starts it elevated without asking,
 ; so it must not start anything the user's own programs could have replaced. The installer runs
 ; in the all-users context, where $APPDATA and $LOCALAPPDATA name ProgramData; the per-user paths
-; below switch to the current user's first.
+; below switch to the current user's first. The one exception is a per-user copy from 1.0.4 or
+; earlier in a folder the user picked: an update stays in that folder (see below).
 ;
 ; Up to 1.0.1 KeyCat for Windows was an Electron app in %LOCALAPPDATA%\Programs\KeyCat. Its
 ; updater downloads this installer like any other release, so here the old copy is removed and
@@ -12,6 +13,8 @@
 ; Its updater passes --force-run when the app should start again afterwards.
 
 Var MigratedFromElectron
+Var MovedFrom
+Var HadDesktopShortcut
 
 !macro NSIS_HOOK_PREINSTALL
   SetShellVarContext current
@@ -44,18 +47,52 @@ Var MigratedFromElectron
   ${EndIf}
   RMDir /r "$LOCALAPPDATA\keycat-win-updater"
 
-  ; Up to 1.0.4 the Tauri build installed per user into %LOCALAPPDATA%\KeyCat. That copy goes; an
-  ; uninstall without /UPDATE also drops its Run value, so start at login is pointed at this one.
-  StrCpy $R8 "$LOCALAPPDATA\${PRODUCTNAME}"
+  ; Up to 1.0.4 the Tauri build installed per user, into %LOCALAPPDATA%\KeyCat unless the user
+  ; picked another folder such as D:\KeyCat; its uninstall entry in HKCU says where, in quotes.
+  ; That copy goes, or its shortcuts keep starting it and it updates itself here again and again.
+  ; Its uninstaller takes its shortcuts along, which an update does not make again, so
+  ; NSIS_HOOK_POSTINSTALL does. An uninstall without /UPDATE also drops its Run value, so start at
+  ; login is pointed at this one.
+  ReadRegStr $R8 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}" "InstallLocation"
+  StrCpy $R9 $R8 1
+  ${If} $R9 == "$\""
+    StrCpy $R8 $R8 -1 1
+  ${EndIf}
+  ${If} $R8 == ""
+    StrCpy $R8 "$LOCALAPPDATA\${PRODUCTNAME}"
+  ${EndIf}
   ${If} $R8 != $INSTDIR
   ${AndIf} ${FileExists} "$R8\uninstall.exe"
     DetailPrint "Removing the per-user KeyCat in $R8"
     ReadRegStr $R7 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
     nsExec::Exec 'taskkill /f /im ${MAINBINARYNAME}.exe'
     Pop $R9
+    ${If} ${FileExists} "$DESKTOP\${PRODUCTNAME}.lnk"
+      StrCpy $HadDesktopShortcut 1
+    ${EndIf}
     ExecWait '"$R8\uninstall.exe" /S _?=$R8'
     Delete "$R8\uninstall.exe"
     RMDir "$R8"
+    ; The uninstaller only removes a desktop shortcut that started this copy.
+    ${If} ${FileExists} "$DESKTOP\${PRODUCTNAME}.lnk"
+      StrCpy $HadDesktopShortcut 0
+    ${EndIf}
+    ; An update keeps a folder the user picked and installs there, not in Program Files; the
+    ; installer's own folder page is left to the user. A copy that 1.1.0 put in Program Files
+    ; beside the old one (it did not find this folder) goes. Outside Program Files KeyCat makes
+    ; no login task for 以管理员身份运行 (task_allowed in win/src/autostart.rs).
+    ${If} $UpdateMode = 1
+    ${AndIf} $R8 != "$LOCALAPPDATA\${PRODUCTNAME}"
+      ${If} ${FileExists} "$INSTDIR\uninstall.exe"
+        DetailPrint "Removing the KeyCat in $INSTDIR"
+        Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+        Delete "$INSTDIR\uninstall.exe"
+        RMDir "$INSTDIR"
+        StrCpy $MovedFrom $INSTDIR
+      ${EndIf}
+      StrCpy $INSTDIR $R8
+      SetOutPath $INSTDIR
+    ${EndIf}
     ${If} $R7 != ""
       WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" '"$INSTDIR\${MAINBINARYNAME}.exe"'
     ${EndIf}
@@ -76,6 +113,32 @@ Var MigratedFromElectron
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; An update makes no shortcuts. Those of a Program Files copy removed above follow this one; the
+  ; start menu entry, gone with a per-user copy (1.1.0 did not make it again either), and the
+  ; desktop one if the per-user copy had it, are made here.
+  ${If} $UpdateMode = 1
+    ${If} $MovedFrom != ""
+      !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$MovedFrom\${MAINBINARYNAME}.exe"
+      Pop $R9
+      ${If} $R9 = 1
+        !insertmacro SetShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+      ${EndIf}
+      !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$MovedFrom\${MAINBINARYNAME}.exe"
+      Pop $R9
+      ${If} $R9 = 1
+        !insertmacro SetShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+      ${EndIf}
+    ${EndIf}
+    ${IfNot} ${FileExists} "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+      CreateShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+      !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+    ${EndIf}
+    ${If} $HadDesktopShortcut = 1
+    ${AndIfNot} ${FileExists} "$DESKTOP\${PRODUCTNAME}.lnk"
+      CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+      !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
+    ${EndIf}
+  ${EndIf}
   ${If} $MigratedFromElectron = 1
     ClearErrors
     ${GetOptions} $CMDLINE "--force-run" $R9
