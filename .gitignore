@@ -16,3 +16,6 @@ win/node_modules/
 win/target/
 win/gen/
 win/out/
+
+# Linux build (GTK3 + WebKitGTK)
+linux/target/

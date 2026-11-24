@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=KeyCat
+GenericName=Desktop Typing Cat
+GenericName[zh_CN]=桌面打字猫
+Comment=A desktop cat that reacts to your keyboard and mouse
+Comment[zh_CN]=一只趴在键盘上的桌面猫
+Exec=/usr/bin/keycat
+Icon=keycat
+Terminal=false
+Categories=Utility;Amusement;
+Keywords=cat;pet;keyboard;wayland;
+StartupWMClass=com.ellobok.keycat
