@@ -1,14 +1,15 @@
-//! KDE Plasma native system tray via StatusNotifierItem (`ksni`).
+//! KDE Plasma native system tray via StatusNotifierItem (`ksni`), aligned with KeyCat 1.1.0 menu.
 
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 use ksni::{Handle, Icon, ToolTip, Tray, TrayService};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::state::{
-    MenuAction, MenuSnapshot, COATS, COLLARS, EYES, SHINES, SIZES, SLEEP_OPTIONS,
+    MenuAction, MenuSnapshot, COATS, COLLARS, EYES, GLOVES, KEYBOARD_COLORS, OPACITIES,
+    PAIR_MODES, SHINES, SIZES, SLEEP_OPTIONS,
 };
 
 struct KeyCatTray {
@@ -66,6 +67,90 @@ impl KeyCatTray {
     }
 }
 
+fn check_item(
+    label: &str,
+    checked: bool,
+    on_activate: impl Fn(&mut KeyCatTray) + Send + Sync + 'static,
+) -> MenuItem<KeyCatTray> {
+    CheckmarkItem {
+        label: label.into(),
+        checked,
+        activate: Box::new(on_activate),
+        ..Default::default()
+    }
+    .into()
+}
+
+fn action_item(label: &str, action: MenuAction) -> MenuItem<KeyCatTray> {
+    StandardItem {
+        label: label.into(),
+        activate: Box::new(move |tray: &mut KeyCatTray| tray.emit(action.clone())),
+        ..Default::default()
+    }
+    .into()
+}
+
+fn toggle_item(label: &str, key: &'static str, current: bool) -> MenuItem<KeyCatTray> {
+    let next = !current;
+    check_item(label, current, move |tray| {
+        tray.emit(MenuAction::SetValue {
+            key: key.into(),
+            value: json!(next),
+        });
+    })
+}
+
+fn choice_str(
+    title: &str,
+    key: &str,
+    current: &str,
+    options: &[(&str, &'static str)],
+) -> MenuItem<KeyCatTray> {
+    let submenu = options
+        .iter()
+        .map(|&(label, val)| {
+            let key = key.to_string();
+            check_item(label, current == val, move |tray| {
+                tray.emit(MenuAction::SetValue {
+                    key: key.clone(),
+                    value: json!(val),
+                });
+            })
+        })
+        .collect();
+    SubMenu {
+        label: title.into(),
+        submenu,
+        ..Default::default()
+    }
+    .into()
+}
+
+fn choice_f64(
+    title: &str,
+    key: &'static str,
+    current: f64,
+    options: &[(&str, f64)],
+) -> MenuItem<KeyCatTray> {
+    let submenu = options
+        .iter()
+        .map(|&(label, val)| {
+            check_item(label, (current - val).abs() < 0.01, move |tray| {
+                tray.emit(MenuAction::SetValue {
+                    key: key.into(),
+                    value: Value::from(val),
+                });
+            })
+        })
+        .collect();
+    SubMenu {
+        label: title.into(),
+        submenu,
+        ..Default::default()
+    }
+    .into()
+}
+
 impl Tray for KeyCatTray {
     fn id(&self) -> String {
         "com.ellobok.keycat".into()
@@ -96,212 +181,38 @@ impl Tray for KeyCatTray {
         let s = &snap.settings;
         let coat = s.coat.as_str();
 
-        let mut items: Vec<MenuItem<Self>> = Vec::new();
+        let mut items: Vec<MenuItem<Self>> = vec![
+            check_item(
+                if snap.pomodoro { "结束番茄钟" } else { "开始番茄钟" },
+                snap.pomodoro,
+                |tray| tray.emit(MenuAction::TogglePomodoro),
+            ),
+            action_item("今日小结…", MenuAction::OpenStats),
+            action_item("拍一张动图（3 秒）", MenuAction::RecordGif),
+            MenuItem::Separator,
+        ];
 
-        let next_style = if s.style == "3d" { "2d" } else { "3d" };
-        items.push(
-            CheckmarkItem {
-                label: "立体效果（3D）".into(),
-                checked: s.style == "3d",
-                activate: Box::new(move |tray: &mut Self| {
-                    tray.emit(MenuAction::SetValue {
-                        key: "style".into(),
-                        value: json!(next_style),
-                    });
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        let coat_items = COATS
-            .iter()
-            .map(|&(label, val)| {
-                let checked = coat == val;
-                CheckmarkItem {
-                    label: label.into(),
-                    checked,
-                    activate: Box::new(move |tray: &mut Self| {
-                        tray.emit(MenuAction::SetValue {
-                            key: "coat".into(),
-                            value: json!(val),
-                        });
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
-        items.push(
-            SubMenu {
-                label: "毛色".into(),
-                submenu: coat_items,
-                ..Default::default()
-            }
-            .into(),
-        );
-
+        // 外观
+        let mut look: Vec<MenuItem<Self>> = vec![choice_str("毛色", "coat", coat, COATS)];
         if coat == "orange" || coat == "grey" {
             let striped = s.pattern == "tabby" || (s.pattern == "auto" && coat == "orange");
-            let key = format!("pattern.{coat}");
-            let key_solid = key.clone();
-            let key_tabby = key;
-            items.push(
-                SubMenu {
-                    label: "花纹".into(),
-                    submenu: vec![
-                        CheckmarkItem {
-                            label: "纯色".into(),
-                            checked: !striped,
-                            activate: Box::new(move |tray: &mut Self| {
-                                tray.emit(MenuAction::SetValue {
-                                    key: key_solid.clone(),
-                                    value: json!("solid"),
-                                });
-                            }),
-                            ..Default::default()
-                        }
-                        .into(),
-                        CheckmarkItem {
-                            label: "虎斑条纹".into(),
-                            checked: striped,
-                            activate: Box::new(move |tray: &mut Self| {
-                                tray.emit(MenuAction::SetValue {
-                                    key: key_tabby.clone(),
-                                    value: json!("tabby"),
-                                });
-                            }),
-                            ..Default::default()
-                        }
-                        .into(),
-                    ],
-                    ..Default::default()
-                }
-                .into(),
-            );
+            let current = if striped { "tabby" } else { "solid" };
+            look.push(choice_str(
+                "花纹",
+                &format!("pattern.{coat}"),
+                current,
+                &[("纯色", "solid"), ("虎斑条纹", "tabby")],
+            ));
         }
-
-        let eye_items = EYES
-            .iter()
-            .map(|&(label, val)| {
-                CheckmarkItem {
-                    label: label.into(),
-                    checked: s.eye == val,
-                    activate: Box::new(move |tray: &mut Self| {
-                        tray.emit(MenuAction::SetValue {
-                            key: "eyeColor".into(),
-                            value: json!(val),
-                        });
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
-        let shine_items = SHINES
-            .iter()
-            .map(|&(label, val)| {
-                CheckmarkItem {
-                    label: label.into(),
-                    checked: s.shine == val,
-                    activate: Box::new(move |tray: &mut Self| {
-                        tray.emit(MenuAction::SetValue {
-                            key: "eyeShine".into(),
-                            value: json!(val),
-                        });
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
-        let collar_items = COLLARS
-            .iter()
-            .map(|&(label, val)| {
-                CheckmarkItem {
-                    label: label.into(),
-                    checked: s.collar == val,
-                    activate: Box::new(move |tray: &mut Self| {
-                        tray.emit(MenuAction::SetValue {
-                            key: "collar".into(),
-                            value: json!(val),
-                        });
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
-
-        let next_blush = !s.blush;
-        let next_whiskers = !s.whiskers;
-        items.push(
-            SubMenu {
-                label: "外观".into(),
-                submenu: vec![
-                    SubMenu {
-                        label: "眼睛颜色".into(),
-                        submenu: eye_items,
-                        ..Default::default()
-                    }
-                    .into(),
-                    SubMenu {
-                        label: "眼睛高光".into(),
-                        submenu: shine_items,
-                        ..Default::default()
-                    }
-                    .into(),
-                    SubMenu {
-                        label: "项圈".into(),
-                        submenu: collar_items,
-                        ..Default::default()
-                    }
-                    .into(),
-                    CheckmarkItem {
-                        label: "腮红".into(),
-                        checked: s.blush,
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.emit(MenuAction::SetValue {
-                                key: "blush".into(),
-                                value: json!(next_blush),
-                            });
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                    CheckmarkItem {
-                        label: "胡须".into(),
-                        checked: s.whiskers,
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.emit(MenuAction::SetValue {
-                                key: "whiskers".into(),
-                                value: json!(next_whiskers),
-                            });
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                ],
-                ..Default::default()
-            }
-            .into(),
-        );
-
         let size_items = SIZES
             .iter()
             .map(|&(label, val)| {
-                CheckmarkItem {
-                    label: label.into(),
-                    checked: (s.scale - val).abs() < 0.01,
-                    activate: Box::new(move |tray: &mut Self| {
-                        tray.emit(MenuAction::SetScale(val));
-                    }),
-                    ..Default::default()
-                }
-                .into()
+                check_item(label, (s.scale - val).abs() < 0.01, move |tray| {
+                    tray.emit(MenuAction::SetScale(val));
+                })
             })
             .collect();
-        items.push(
+        look.push(
             SubMenu {
                 label: "大小".into(),
                 submenu: size_items,
@@ -309,103 +220,92 @@ impl Tray for KeyCatTray {
             }
             .into(),
         );
-
-        let sleep_items = SLEEP_OPTIONS
-            .iter()
-            .map(|&(label, val)| {
-                CheckmarkItem {
-                    label: label.into(),
-                    checked: (s.sleep_after - val).abs() < 0.01,
-                    activate: Box::new(move |tray: &mut Self| {
-                        tray.emit(MenuAction::SetValue {
-                            key: "sleepAfter".into(),
-                            value: json!(val),
-                        });
-                    }),
-                    ..Default::default()
-                }
-                .into()
-            })
-            .collect();
+        let next_style = if s.style == "3d" { "2d" } else { "3d" };
+        look.push(check_item("立体效果（3D）", s.style == "3d", move |tray| {
+            tray.emit(MenuAction::SetValue {
+                key: "style".into(),
+                value: json!(next_style),
+            });
+        }));
+        look.push(MenuItem::Separator);
+        look.push(choice_str("眼睛颜色", "eyeColor", &s.eye, EYES));
+        look.push(choice_str("眼睛高光", "eyeShine", &s.shine, SHINES));
+        look.push(choice_str("手套颜色", "gloves", &s.gloves, GLOVES));
+        look.push(choice_str("项圈", "collar", &s.collar, COLLARS));
+        look.push(toggle_item("腮红", "blush", s.blush));
+        look.push(toggle_item("胡须", "whiskers", s.whiskers));
+        look.push(toggle_item("节日装扮", "festival", s.festival));
         items.push(
             SubMenu {
-                label: "多久睡着".into(),
-                submenu: sleep_items,
+                label: "外观".into(),
+                submenu: look,
                 ..Default::default()
             }
             .into(),
         );
 
-        let next_privacy = !s.privacy;
+        // 桌面
         items.push(
-            CheckmarkItem {
-                label: "隐私模式（不显示键名）".into(),
-                checked: s.privacy,
-                activate: Box::new(move |tray: &mut Self| {
-                    tray.emit(MenuAction::SetValue {
-                        key: "privacy".into(),
-                        value: json!(next_privacy),
-                    });
-                }),
+            SubMenu {
+                label: "桌面".into(),
+                submenu: vec![
+                    choice_str("键盘颜色", "keyboardColor", &s.keyboard_color, KEYBOARD_COLORS),
+                    toggle_item("鼠标线", "mouseCable", s.mouse_cable),
+                    toggle_item("桌上的杯子（它会推下去）", "cup", s.cup),
+                    choice_f64("透明度", "opacity", s.opacity, OPACITIES),
+                ],
                 ..Default::default()
             }
             .into(),
         );
 
-        let next_ct = !s.click_through;
+        // 习性
         items.push(
-            CheckmarkItem {
-                label: "鼠标穿透（点击直接落到下层窗口）".into(),
-                checked: s.click_through,
-                activate: Box::new(move |tray: &mut Self| {
-                    tray.emit(MenuAction::SetValue {
-                        key: "clickThrough".into(),
-                        value: json!(next_ct),
-                    });
-                }),
+            SubMenu {
+                label: "习性".into(),
+                submenu: vec![
+                    choice_f64("多久睡着", "sleepAfter", s.sleep_after, SLEEP_OPTIONS),
+                    toggle_item("声音（摸它时呼噜）", "sound", s.sound),
+                    action_item("调节反应…", MenuAction::OpenSettings),
+                ],
                 ..Default::default()
             }
             .into(),
         );
 
+        // 第二只猫
         items.push(
-            StandardItem {
-                label: "调节反应…".into(),
-                activate: Box::new(|tray: &mut Self| tray.emit(MenuAction::OpenSettings)),
+            SubMenu {
+                label: "第二只猫".into(),
+                submenu: vec![
+                    check_item("陪着它", s.second_cat, |tray| {
+                        tray.emit(MenuAction::ToggleSecondCat);
+                    }),
+                    choice_str("它的毛色", "cat2.coat", &s.coat2, COATS),
+                    choice_str("怎么相处", "pairMode", &s.pair_mode, PAIR_MODES),
+                ],
                 ..Default::default()
             }
             .into(),
         );
 
         items.push(MenuItem::Separator);
+        items.push(toggle_item("隐私模式（不显示键名）", "privacy", s.privacy));
+        items.push(toggle_item(
+            "鼠标穿透（点击直接落到下层窗口）",
+            "clickThrough",
+            s.click_through,
+        ));
+        items.push(action_item("回到右下角", MenuAction::ResetHome));
+        items.push(action_item(
+            if snap.visible { "隐藏" } else { "显示" },
+            MenuAction::ToggleVisibility,
+        ));
 
-        items.push(
-            CheckmarkItem {
-                label: "开机自启".into(),
-                checked: snap.autostart,
-                activate: Box::new(|tray: &mut Self| tray.emit(MenuAction::ToggleAutostart)),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        items.push(
-            StandardItem {
-                label: "回到右下角".into(),
-                activate: Box::new(|tray: &mut Self| tray.emit(MenuAction::ResetHome)),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        items.push(
-            StandardItem {
-                label: if snap.visible { "隐藏" } else { "显示" }.into(),
-                activate: Box::new(|tray: &mut Self| tray.emit(MenuAction::ToggleVisibility)),
-                ..Default::default()
-            }
-            .into(),
-        );
+        items.push(MenuItem::Separator);
+        items.push(check_item("开机自启", snap.autostart, |tray| {
+            tray.emit(MenuAction::ToggleAutostart);
+        }));
 
         if !snap.hook_ready {
             items.push(MenuItem::Separator);
@@ -435,16 +335,7 @@ impl Tray for KeyCatTray {
         }
 
         items.push(MenuItem::Separator);
-
-        items.push(
-            StandardItem {
-                label: "退出 KeyCat".into(),
-                activate: Box::new(|tray: &mut Self| tray.emit(MenuAction::Quit)),
-                ..Default::default()
-            }
-            .into(),
-        );
-
+        items.push(action_item("退出 KeyCat", MenuAction::Quit));
         items
     }
 }
