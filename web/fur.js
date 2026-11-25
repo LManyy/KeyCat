@@ -1,5 +1,5 @@
 // Fur: flat sticker colour plus the markings that make a coat read as a real cat — a pale muzzle
-// and bib, pink inner ears, tabby stripes, calico patches, Siamese-style points, a rex curl — and
+// and bib, pink inner ears, tabby stripes, calico patches, Siamese-style points — and
 // a soft top-left shade for volume.
 // Markings are placed in each part's rest shape, so they stay put when the spine bends.
 'use strict';
@@ -20,7 +20,6 @@
     uCalico: { value: 0 },
     uTuxedo: { value: 0 },
     uPoints: { value: 0 },
-    uCurl: { value: 0 },
     uInnerAmt: { value: 0 },
     uShade: { value: 0 },
   };
@@ -48,7 +47,7 @@
 
   const fragment = `
     uniform vec3 uFur, uLight, uDark, uPatchA, uPatchB, uPoint, uInner;
-    uniform float uStripes, uMuzzle, uBib, uCalico, uTuxedo, uPoints, uCurl, uInnerAmt, uShade;
+    uniform float uStripes, uMuzzle, uBib, uCalico, uTuxedo, uPoints, uInnerAmt, uShade;
     varying vec3 vRest;
     varying vec3 vNormal;
     varying float vAlong;
@@ -72,14 +71,14 @@
     void main() {
       vec3 col = uFur;
       vec3 p = vRest;
-      // \`point\`: how far into the colourpoint this spot is; \`curl\`: the rex coat's waves.
-      float light = 0.0, dark = 0.0, inner = 0.0, point = 0.0, curl = 0.0;
+      // \`point\`: how far into the colourpoint this spot is.
+      float light = 0.0, dark = 0.0, inner = 0.0, point = 0.0;
       #ifdef HEAD
         // Head geometry is a unit sphere scaled (0.56, 0.47, 0.47) by the mesh.
         if (p.z > 0.0) {
           vec2 q = p.xy;
-          // Colourpoint mask: an oval over eyes, nose and muzzle that fades out towards the brow.
-          point = 1.0 - smoothstep(0.62, 1.0, length((q - vec2(0.0, -0.2)) / vec2(0.74, 0.74)));
+          // Colourpoint mask: a crisp-edged oval over the nose and muzzle that reaches up under the eyes, like a cut-paper shape.
+          point = blob(q, vec2(0.0, -0.3), vec2(0.64, 0.54));
           // Two lobes under the nose and a little chin: the classic pale cat muzzle.
           float m = max(max(blob(q, vec2(-0.2, -0.47), vec2(0.27, 0.22)), blob(q, vec2(0.2, -0.47), vec2(0.27, 0.22))),
                         blob(q, vec2(0.0, -0.66), vec2(0.26, 0.18)));
@@ -87,11 +86,11 @@
           // Tuxedo blaze: the muzzle widens and runs up between the eyes.
           float blaze = max(m, blob(q, vec2(0.0, -0.1), vec2(0.12, 0.42)) * step(q.y, 0.35));
           light = max(light, blaze * uTuxedo);
-          // Tabby "M" on the forehead and streaks running back from the eyes.
-          float mk = stroke(q, vec2(0.0, 0.42), vec2(0.0, 0.85), 0.07, 0.55);
-          mk = max(mk, stroke(vec2(abs(q.x), q.y), vec2(0.15, 0.4), vec2(0.27, 0.84), 0.06, 0.45));
-          mk = max(mk, stroke(vec2(abs(q.x), q.y), vec2(0.72, 0.05), vec2(0.98, 0.16), 0.055, 0.4));
-          mk = max(mk, stroke(vec2(abs(q.x), q.y), vec2(0.74, -0.16), vec2(0.99, -0.12), 0.05, 0.4));
+          // Tabby: three short strokes on the forehead and two on each cheek, like brush marks.
+          float mk = stroke(q, vec2(0.0, 0.48), vec2(0.0, 0.82), 0.055, 0.5);
+          mk = max(mk, stroke(vec2(abs(q.x), q.y), vec2(0.17, 0.46), vec2(0.25, 0.78), 0.045, 0.45));
+          mk = max(mk, stroke(vec2(abs(q.x), q.y), vec2(0.74, 0.02), vec2(0.98, 0.1), 0.045, 0.35));
+          mk = max(mk, stroke(vec2(abs(q.x), q.y), vec2(0.76, -0.17), vec2(0.99, -0.15), 0.04, 0.35));
           dark = max(dark, mk * uStripes);
         }
         // Calico: an orange patch over the left brow and ear, a black one over the right.
@@ -104,23 +103,25 @@
         float bibW = mix(0.55, 0.85, smoothstep(0.75, 1.2, p.y));
         float bib = 1.0 - smoothstep(bibW * 0.96, bibW, a);
         light = max(light, bib * max(uBib, uTuxedo));
-        // Mackerel stripes wrap round the flanks and back, stopping short of the chest. They taper
-        // to a point where they stop rather than fading, like brush strokes.
-        float wave = p.y + 0.05 * sin(a * 3.0);
-        float reach = smoothstep(0.62, 1.1, a);
-        float band = rings(wave, 6.5, 0.36 * reach) * step(0.3, p.y) * step(p.y, 1.2);
+        // Tabby: four bold strokes on each flank that come in from the back and taper to a point
+        // before the chest, as a brush would lay them, rather than rings round the body.
+        float wave = p.y + 0.04 * sin(a * 3.0);
+        float reach = smoothstep(0.95, 1.6, a);
+        float band = 0.0;
+        for (int i = 0; i < 4; i++) {
+          float d = abs(wave - (0.4 + 0.21 * float(i)) + 0.05 * (a - 1.6));
+          float w = 0.055 * reach;
+          band = max(band, 1.0 - smoothstep(w * 0.85, w, d));
+        }
         dark = max(dark, band * uStripes);
         float pa = blob3(p, vec3(-0.5, 0.95, -0.3), 0.55);
         float pb = blob3(p, vec3(0.55, 0.55, -0.15), 0.5) * (1.0 - bib);
-        // Rex waves: short wavy lines all over, a shade darker than the coat.
-        curl = rings(p.y + 0.035 * sin(a * 11.0 + p.y * 7.0), 10.0, 0.14) * step(0.18, p.y) * step(p.y, 1.22);
       #endif
       #ifdef EAR
         // Ear lathe: radius shrinks from 0.28 at the base to 0 at the tip (y 0.37).
         // Every point lies on the lathe radius, so the inner ear is a band across the front face.
-        // The point colour comes in above the base, so the ear grows out of the head's colour
-        // rather than sitting on it like a cut-out.
-        point = smoothstep(0.06, 0.2, p.y);
+        // The point colour starts a little above the base with a crisp edge, like the mask.
+        point = smoothstep(0.09, 0.1, p.y);
         float rMax = mix(0.28, 0.0, clamp((p.y + 0.06) / 0.43, 0.0, 1.0));
         inner = (1.0 - smoothstep(0.52, 0.58, abs(p.x) / max(rMax, 0.001))) * smoothstep(0.13, 0.14, p.y) * (1.0 - smoothstep(0.3, 0.31, p.y)) * step(0.0, p.z);
         #ifdef LEFT
@@ -130,24 +131,24 @@
         #endif
       #endif
       #ifdef TAIL
-        // Rings down the tail, a dark tip; calico tails are black with one orange band.
-        dark = max(dark, rings(vAlong, 5.0, 0.42) * step(0.2, vAlong) * uStripes);
-        dark = max(dark, smoothstep(0.9, 0.91, vAlong) * uStripes);
-        float pa = rings(vAlong + 0.12, 1.0, 0.3), pb = 1.0 - pa;
-        point = smoothstep(0.0, 0.3, vAlong);
-        curl = rings(vAlong, 9.0, 0.16) * step(0.12, vAlong);
+        // Three wide bands down the tail and a dark tip. Calico tails: white, a black band, an
+        // orange end. Points: dark from a third of the way along.
+        dark = max(dark, rings(vAlong + 0.08, 3.5, 0.42) * step(0.3, vAlong) * uStripes);
+        dark = max(dark, smoothstep(0.88, 0.89, vAlong) * uStripes);
+        float pa = smoothstep(0.62, 0.63, vAlong), pb = smoothstep(0.32, 0.33, vAlong) * (1.0 - pa);
+        point = smoothstep(0.3, 0.31, vAlong);
       #endif
       #ifdef ARM
-        dark = max(dark, rings(vAlong, 3.0, 0.38) * step(0.4, vAlong) * uStripes);
+        // No stripes on the legs: at this size they read as rings round a tube.
         // Calico forelegs are white, as on most real calicos.
         float pa = 0.0, pb = 0.0;
-        // Points darken the legs from the elbow down.
-        point = smoothstep(0.3, 0.8, vAlong);
+        // Points: dark boots from halfway down the leg, crisp at the top.
+        point = smoothstep(0.55, 0.56, vAlong);
       #endif
       col = mix(col, uPatchA, pa * uCalico);
       col = mix(col, uPatchB, pb * uCalico);
       col = mix(col, uPoint, point * uPoints);
-      col = mix(col, uDark, max(dark, curl * uCurl));
+      col = mix(col, uDark, dark);
       col = mix(col, uLight, light);
       col = mix(col, uInner, inner * uInnerAmt);
       // Soft volume: lit from the top left, a touch darker towards the silhouette and underneath.
@@ -181,6 +182,6 @@
   // Writes a coat: colours plus how strongly each marking shows (0 hides it).
   K.setFur = f => {
     for (const k of ['fur', 'light', 'dark', 'patchA', 'patchB', 'point', 'inner']) U['u' + k[0].toUpperCase() + k.slice(1)].value.set(f[k] || f.fur);
-    for (const k of ['stripes', 'muzzle', 'bib', 'calico', 'tuxedo', 'points', 'curl', 'innerAmt', 'shade']) U['u' + k[0].toUpperCase() + k.slice(1)].value = f[k] || 0;
+    for (const k of ['stripes', 'muzzle', 'bib', 'calico', 'tuxedo', 'points', 'innerAmt', 'shade']) U['u' + k[0].toUpperCase() + k.slice(1)].value = f[k] || 0;
   };
 })();

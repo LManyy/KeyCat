@@ -12,6 +12,6 @@ for arch in arm64 x86_64; do
 done
 lipo -create build/arch/KeyCat-arm64 build/arch/KeyCat-x86_64 -output "$APP/Contents/MacOS/KeyCat"
 cp mac/Info.plist "$APP/Contents/Info.plist"
-cp web/index.html web/settings.html web/*.js web/THREE_LICENSE "$APP/Contents/Resources/web/"
+cp web/*.html web/*.js web/THREE_LICENSE "$APP/Contents/Resources/web/"
 sh mac/sign.sh "$APP"
 echo "built $APP"

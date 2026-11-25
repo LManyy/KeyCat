@@ -21,7 +21,7 @@
     "createUpdaterArtifacts": true,
     "windows": {
       "nsis": {
-        "installMode": "currentUser",
+        "installMode": "perMachine",
         "languages": ["SimpChinese"],
         "installerHooks": "./installer-hooks.nsh"
       }

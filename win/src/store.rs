@@ -1,7 +1,8 @@
 //! A tiny JSON-backed settings store. Keys mirror the mac build's UserDefaults names so the two
 //! versions are easy to compare: catScale, style, coat, pattern.<coat>, eyeColor, eyeShine, blush,
-//! whiskers, collar, privacy, clickThrough, sleepAfter, tune, originX, originY. runAsAdmin is
-//! Windows-only.
+//! whiskers, collar, gloves, mouseCable, keyboardColor, opacity, privacy, clickThrough, sleepAfter, tune, originX, originY, sound, festival, cup,
+//! secondCat, pairMode, cat2.coat, cat2.originX, cat2.originY, and memory (what the
+//! cat remembers, see web/life.js). runAsAdmin is Windows-only.
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;

@@ -29,14 +29,33 @@
     color: var(--text); font: inherit; cursor: pointer; }
   button:active { background: var(--line); }
   button.reset { flex: 0 0 auto; color: var(--muted); }
+  .bar.tests { flex-wrap: wrap; }
+  .bar.tests button { flex: 1 0 28%; }
+  .presets { display: flex; gap: 6px; padding: 10px 0 4px; }
+  .presets button { flex: 1; padding: 6px 4px; }
+  .presets button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  #presetHint { min-height: 16px; padding-bottom: 8px; }
 </style>
 </head>
 <body>
+<h2>性格</h2>
+<div class="card">
+  <div class="presets" id="presets"></div>
+  <div class="hint" id="presetHint"></div>
+</div>
 <div id="form"></div>
+<h2>试试看</h2>
+<div class="bar tests">
+  <button data-test="annoy">生气</button>
+  <button data-test="curious">好奇</button>
+  <button data-test="push">推杯子</button>
+  <button data-test="board">霸占键盘</button>
+  <button data-test="yawn">打哈欠</button>
+  <button data-test="knead">呼噜踩奶</button>
+  <button data-test="nag">提醒休息</button>
+</div>
 <div class="bar">
-  <button data-test="annoy">让它生气试试</button>
-  <button data-test="curious">让它好奇试试</button>
-  <button class="reset" id="reset">恢复默认</button>
+  <button class="reset" id="reset">全部恢复默认</button>
 </div>
 <script src="tuning.js"></script>
 <script>
@@ -44,7 +63,7 @@
 const send = msg => window.webkit?.messageHandlers?.settings?.postMessage(msg);
 const values = { ...TUNING };
 const inputs = {};
-const fmt = (it, v) => (it.step < 1 ? Number(v).toFixed(1) : String(v)) + ' ' + it.unit;
+const fmt = (it, v) => it.fmt ? it.fmt(v) : (it.step < 1 ? Number(v).toFixed(1) : String(v)) + ' ' + it.unit;
 
 function render() {
   const form = document.getElementById('form');
@@ -99,12 +118,33 @@ function show() {
     else { input.value = values[it.key]; input.show(values[it.key]); }
   }
   // A switched-off group greys out its sliders.
-  for (const [toggle, group] of [['annoyOn', TUNING_SCHEMA[0].group], ['curiousOn', TUNING_SCHEMA[1].group]]) {
+  for (const g of TUNING_SCHEMA.filter(g => g.switch)) {
     for (const { it, row } of Object.values(inputs)) {
-      if (row.dataset.group === group && it.key !== toggle) row.classList.toggle('off', !values[toggle]);
+      if (row.dataset.group === g.group && it.key !== g.switch) row.classList.toggle('off', !values[g.switch]);
     }
   }
+  // Late night greys out with its own toggle.
+  inputs.nightAt.row.classList.toggle('off', !values.nightOn);
+  // The personality whose values match exactly lights up.
+  const current = TUNING_PRESETS.find(p => Object.keys(TUNING).every(k => values[k] === (k in p.values ? p.values[k] : TUNING[k])));
+  for (const b of presetButtons) b.classList.toggle('on', b.preset === current);
+  document.getElementById('presetHint').textContent = current ? current.hint || '每项都是默认值。' : '已按你的喜好调过。';
 }
+
+// Picking a personality replaces every value: its own, and the defaults for the rest.
+const presetButtons = TUNING_PRESETS.map(p => {
+  const b = document.createElement('button');
+  b.textContent = p.name;
+  b.preset = p;
+  b.addEventListener('click', () => {
+    Object.assign(values, TUNING, p.values);
+    show();
+    // One message, so the app replaces the saved values in one go.
+    send({ preset: p.values });
+  });
+  document.getElementById('presets').append(b);
+  return b;
+});
 
 function set(it, v) {
   values[it.key] = v;

@@ -6,25 +6,31 @@ import WebKit
 let designSize = CGSize(width: 360, height: 368)
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessageHandler, WKNavigationDelegate {
-    var panel: NSPanel!
-    var webView: WebCatView!
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    /// The main cat first; a second one joins when 第二只猫 is on.
+    var cats: [CatPanel] = []
+    var main: CatPanel { cats[0] }
+    var panel: NSPanel { main.panel }
     var statusItem: NSStatusItem!
     var timer: Timer?
     var tapRetry: Timer?
     var statusTimer: Timer?
     var eventTap: CFMachPort?
     var keyboardAllowed = true
-    var pageReady = false
-    var hit = "none"
-    var dragging = false
     var pendingDelta = CGPoint.zero
-    var lastCursor = CGPoint(x: -1, y: -1)
     var heldModifiers = Set<Int>()
+    /// Keys the page thinks are down, with when they went down (see releaseLostKeys).
+    var heldKeys: [Int: Date] = [:]
+    var heldCheck: Timer?
     /// Count only, for status.txt; which keys were pressed is never kept.
     var keyEvents = 0
+    /// Not remembered across restarts: a pomodoro started yesterday is over.
+    var pomodoro = false
+    /// Off in the check modes, which must not overwrite the real app's status.txt.
+    var statusReports = true
     let defaults = UserDefaults.standard
     lazy var settings = SettingsWindow(app: self)
+    lazy var stats = StatsWindow(app: self)
     lazy var updater = Updater(app: self)
 
     var scale: CGFloat {
@@ -34,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
     var coat: String {
         get { defaults.string(forKey: "coat") ?? "black" }
         set { defaults.set(newValue, forKey: "coat") }
+    }
+    /// The second cat's coat; it shares the rest of the look with the main cat.
+    var coat2: String {
+        get { defaults.string(forKey: "cat2.coat") ?? "orange" }
+        set { defaults.set(newValue, forKey: "cat2.coat") }
     }
     /// "2d" (flat, the default) or "3d" (soft shading).
     var style: String {
@@ -65,6 +76,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
         get { defaults.string(forKey: "collar") ?? "none" }
         set { defaults.set(newValue, forKey: "collar") }
     }
+    var gloves: String {
+        get { defaults.string(forKey: "gloves") ?? "auto" }
+        set { defaults.set(newValue, forKey: "gloves") }
+    }
+    var mouseCable: Bool {
+        get { defaults.object(forKey: "mouseCable") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "mouseCable") }
+    }
+    var keyboardColor: String {
+        get { defaults.string(forKey: "keyboardColor") ?? "cream" }
+        set { defaults.set(newValue, forKey: "keyboardColor") }
+    }
+    /// How see-through the whole picture is, 1 solid.
+    var opacity: Double {
+        get { defaults.object(forKey: "opacity") as? Double ?? 1 }
+        set { defaults.set(newValue, forKey: "opacity") }
+    }
     /// Behaviour settings from the 调节 window, only those changed from the defaults in web/tuning.js.
     var tune: [String: Any] {
         get { defaults.dictionary(forKey: "tune") ?? [:] }
@@ -79,30 +107,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
         get { defaults.bool(forKey: "clickThrough") }
         set {
             defaults.set(newValue, forKey: "clickThrough")
-            if !dragging { panel.ignoresMouseEvents = newValue || hit == "none" }
+            for cat in cats { cat.updateMouseTarget() }
         }
     }
     var sleepAfter: Int {
         get { defaults.object(forKey: "sleepAfter") as? Int ?? 60 }
         set { defaults.set(newValue, forKey: "sleepAfter") }
     }
+    /// The purr; off unless asked for.
+    var sound: Bool {
+        get { defaults.bool(forKey: "sound") }
+        set { defaults.set(newValue, forKey: "sound") }
+    }
+    /// Holiday hats and scarf, and the winter fluff.
+    var festival: Bool {
+        get { defaults.object(forKey: "festival") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "festival") }
+    }
+    /// The mug on the desk that the cat now and then pushes off.
+    var cup: Bool {
+        get { defaults.object(forKey: "cup") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "cup") }
+    }
+    var secondCat: Bool {
+        get { defaults.bool(forKey: "secondCat") }
+        set { defaults.set(newValue, forKey: "secondCat") }
+    }
+    /// "play": both cats have a keyboard and mouse; "split": the main cat types, the second works the mouse.
+    var pairMode: String {
+        get { defaults.string(forKey: "pairMode") ?? "play" }
+        set { defaults.set(newValue, forKey: "pairMode") }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        panel.hidesOnDeactivate = false
-        panel.isMovable = false
-        panel.ignoresMouseEvents = true
-
-        webView = makeWebView()
-        panel.contentView = webView
+        cats = [CatPanel(app: self, index: 0)]
         applyScale(scale, keepOrigin: false)
         panel.orderFrontRegardless()
+        if secondCat { setSecondCat(true) }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🐈‍⬛"
@@ -112,6 +154,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
 
         installMouseMonitors()
         startKeyboardTap()
+        let check = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.releaseLostKeys() }
+        }
+        RunLoop.main.add(check, forMode: .common)
+        heldCheck = check
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -124,48 +171,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
         updater.install()
     }
 
-    func makeWebView() -> WebCatView {
-        let config = WKWebViewConfiguration()
-        config.userContentController.add(WeakScriptHandler(self), name: "cat")
-        config.suppressesIncrementalRendering = true
-        let view = WebCatView(frame: .zero, configuration: config)
-        view.app = self
-        view.setValue(false, forKey: "drawsBackground")
-        view.underPageBackgroundColor = .clear
-        view.navigationDelegate = self
-        view.autoresizingMask = [.width, .height]
-        if let index = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "web") {
-            view.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
-            log("loading \(index.path)")
-        } else {
-            log("web/index.html missing from the app bundle")
+    /// Adds or removes the second cat, next to the main one.
+    func setSecondCat(_ on: Bool) {
+        secondCat = on
+        if on, cats.count == 1 {
+            let cat = CatPanel(app: self, index: 1)
+            cats.append(cat)
+            let size = panel.frame.size
+            let origin = savedOrigin(for: cat) ?? CGPoint(x: panel.frame.minX - size.width * 0.72, y: panel.frame.minY)
+            cat.panel.setFrame(CGRect(origin: origin, size: size), display: true)
+            if panel.isVisible { cat.panel.orderFrontRegardless() }
+        } else if !on, cats.count > 1 {
+            let cat = cats.removeLast()
+            cat.panel.orderOut(nil)
+            cat.webView.configuration.userContentController.removeScriptMessageHandler(forName: "cat")
+            main.js("cat.friend(null)")
         }
-        return view
+        pushOptions()
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        log("page loaded")
-        pageReady = true
-        pushOptions()
+    func pageLoaded(_ cat: CatPanel) {
+        // The main cat keeps the memory; hand it over before anything else happens.
+        if cat.isMain { cat.js("cat.memory(\(memoryJSON))") }
+        pushOptions(to: cat)
+        cat.lastFriend = nil
+        guard cat.isMain, statusReports else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reportStatus() }
         statusTimer?.invalidate()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.reportStatus() }
         }
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        log("page failed: \(error.localizedDescription)")
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        log("page failed to start: \(error.localizedDescription)")
-    }
-
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        log("web content process ended; reloading")
-        pageReady = false
-        webView.reload()
     }
 
     /// ~/Library/Application Support/KeyCat/<name>, creating the folder if needed.
@@ -189,54 +224,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
         }
     }
 
-    func pushOptions() {
-        let options: [String: Any] = ["style": style, "coat": coat, "pattern": pattern, "eye": eyeColor, "shine": eyeShine, "blush": blush,
-                                      "whiskers": whiskers, "collar": collar,
-                                      "privacy": privacy, "sleepAfter": sleepAfter > 0 ? sleepAfter : 1e9,
-                                      "tune": tune]
-        guard let data = try? JSONSerialization.data(withJSONObject: options),
-              let json = String(data: data, encoding: .utf8) else { return }
-        js("cat.options(\(json))")
+    /// What the cat remembers (web/life.js), kept as the JSON the page posted.
+    var memoryJSON: String {
+        guard let data = defaults.data(forKey: "memory"), let text = String(data: data, encoding: .utf8) else { return "null" }
+        return text
     }
 
+    func options(for cat: CatPanel) -> [String: Any] {
+        let role = secondCat && pairMode == "split" ? (cat.isMain ? "keys" : "mouse") : "both"
+        return ["style": style, "coat": cat.isMain ? coat : coat2, "pattern": cat.isMain ? pattern : "auto",
+                "eye": eyeColor, "shine": eyeShine, "blush": blush, "whiskers": whiskers, "collar": collar,
+                "gloves": gloves, "cable": mouseCable, "board": keyboardColor, "opacity": opacity,
+                "privacy": privacy, "sleepAfter": sleepAfter > 0 ? sleepAfter : 1e9, "tune": tune,
+                "sound": sound, "festival": festival, "cup": cup, "pomodoro": cat.isMain && pomodoro,
+                "role": role, "persist": cat.isMain]
+    }
+
+    func pushOptions() {
+        for cat in cats { pushOptions(to: cat) }
+    }
+
+    func pushOptions(to cat: CatPanel) {
+        guard let data = try? JSONSerialization.data(withJSONObject: options(for: cat)),
+              let json = String(data: data, encoding: .utf8) else { return }
+        cat.js("cat.options(\(json))")
+    }
+
+    /// Input and anything else every cat should hear.
     func js(_ script: String) {
-        guard pageReady else { return }
-        webView.evaluateJavaScript(script, completionHandler: nil)
+        for cat in cats { cat.js(script) }
     }
 
     // MARK: Frame loop: forward the pointer to the page.
 
     func tick() {
         let screen = NSEvent.mouseLocation
-        let inWindow = panel.convertPoint(fromScreen: screen)
-        let page = CGPoint(x: inWindow.x.rounded(), y: (panel.frame.height - inWindow.y).rounded())
-        var calls: [String] = []
-        if page != lastCursor {
-            lastCursor = page
-            calls.append("cat.cursor(\(Int(page.x)),\(Int(page.y)))")
+        let delta = pendingDelta
+        pendingDelta = .zero
+        for cat in cats {
+            let page = cat.pagePoint(screen: screen)
+            var calls: [String] = []
+            if page != cat.lastCursor {
+                cat.lastCursor = page
+                calls.append("cat.cursor(\(Int(page.x)),\(Int(page.y)))")
+            }
+            if delta != .zero { calls.append(String(format: "cat.mouseMove(%.1f,%.1f)", delta.x, delta.y)) }
+            // Each cat knows where the other one's head is, to look at it and play.
+            if cats.count > 1 {
+                let other = cats[1 - cat.index]
+                let at = cat.pagePoint(screen: other.headOnScreen)
+                if cat.lastFriend.map({ abs($0.x - at.x) + abs($0.y - at.y) > 2 }) ?? true {
+                    cat.lastFriend = at
+                    calls.append("cat.friend(\(Int(at.x)),\(Int(at.y)))")
+                }
+            }
+            if !calls.isEmpty {
+                let script = calls.joined(separator: ";")
+                cat.js(script)
+            }
+            if cat.hit != "none" && !cat.dragging { refreshCursor(cat) }
         }
-        if pendingDelta != .zero {
-            calls.append(String(format: "cat.mouseMove(%.1f,%.1f)", pendingDelta.x, pendingDelta.y))
-            pendingDelta = .zero
+    }
+
+    /// Messages from a cat's page: what is under the pointer, the memory to keep, a file to save,
+    /// a picture for the 今日小结 card, something to pass on to the other cat.
+    func catMessage(_ cat: CatPanel, _ body: [String: Any]) {
+        if let value = body["hit"] as? String {
+            cat.hit = value
+            cat.updateMouseTarget()
+            refreshCursor(cat)
+        } else if cat.isMain, let memory = body["memory"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: memory) { defaults.set(data, forKey: "memory") }
+            stats.memoryChanged()
+        } else if let file = body["saveFile"] as? [String: Any], let name = file["name"] as? String,
+                  let base64 = file["base64"] as? String {
+            saveToPictures(name: name, base64: base64)
+        } else if let portrait = body["portrait"] as? String {
+            stats.showPortrait(portrait)
+        } else if let event = body["friend"] as? String, ["swat", "blink"].contains(event), cats.count > 1 {
+            cats[1 - cat.index].js("cat.friendEvent('\(event)')")
         }
-        if !calls.isEmpty { js(calls.joined(separator: ";")) }
-        if hit != "none" && !dragging { refreshCursor() }
     }
 
-    /// The page reports what is under the pointer; only the cat itself takes clicks.
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], let value = body["hit"] as? String else { return }
-        hit = value
-        if !dragging { panel.ignoresMouseEvents = clickThrough || value == "none" }
-        refreshCursor()
+    /// Saves a picture the page made into ~/Pictures/KeyCat and shows it in Finder.
+    func saveToPictures(name: String, base64: String) {
+        let safe = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        guard ["gif", "png"].contains((safe as NSString).pathExtension.lowercased()), !safe.hasPrefix("."),
+              let data = Data(base64Encoded: base64) else { return }
+        let dir = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("KeyCat")
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent(safe)
+            try data.write(to: url)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            log("saved \(safe)")
+        } catch {
+            log("saving \(safe) failed: \(error.localizedDescription)")
+        }
     }
 
-    func refreshCursor() {
-        guard hit != "none", !clickThrough else { return }
-        (dragging ? NSCursor.closedHand : NSCursor.openHand).set()
+    func refreshCursor(_ cat: CatPanel) {
+        guard cat.hit != "none", !clickThrough else { return }
+        (cat.dragging ? NSCursor.closedHand : NSCursor.openHand).set()
     }
 
-    func pet(down: Bool, x: CGFloat) { js("cat.pet(\(down), \(Int(x)))") }
+    func pet(_ cat: CatPanel, down: Bool, x: CGFloat) {
+        let script = "cat.pet(\(down), \(Int(x)))"
+        cat.js(script)
+    }
 
     // MARK: Input
 
@@ -269,8 +364,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
     /// Only which key went down or up reaches the page; nothing typed is stored or logged.
     func handleKey(_ keyCode: Int, down: Bool) {
         keyEvents += 1
+        // Caps lock sends no key-up; the page lets it spring back by itself.
+        if keyCode != 57 { heldKeys[keyCode] = down ? Date() : nil }
         guard let code = KeyMap.code(keyCode) else { return }
         js("cat.key('\(code)',\(down))")
+    }
+
+    /// The tap never sees some key-ups: locking the screen (⌃⌘Q), a password field's secure input,
+    /// or the tap being switched off for a moment. The key would then stay down on the page and its
+    /// label hang over the keyboard until pressed again. So a key held for a while is checked
+    /// against the keyboard itself, and let go if it is not actually down.
+    func releaseLostKeys() {
+        let now = Date()
+        for (keyCode, since) in heldKeys where now.timeIntervalSince(since) > 0.4 {
+            if CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(keyCode)) { continue }
+            heldModifiers.remove(keyCode)
+            handleKey(keyCode, down: false)
+        }
     }
 
     /// A listen-only tap can be created without Input Monitoring and then never fire,
@@ -318,10 +428,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScri
     /// Troubleshooting line in ~/Library/Application Support/KeyCat/status.txt:
     /// keyboard permission and how many animation frames the page drew in the last second.
     func reportStatus() {
-        js("cat.state.ticks = 0; 1")
+        main.js("cat.state.ticks = 0; 1")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
-            self.webView.evaluateJavaScript("cat.state.ticks") { result, _ in
+            self.main.webView.evaluateJavaScript("cat.state.ticks") { result, _ in
                 let fps = (result as? NSNumber).map { "\($0.intValue)" } ?? "?"
                 let access = CGPreflightListenEventAccess() ? "granted" : "missing"
                 let line = "\(Date()) keyboard=\(self.keyboardAllowed ? "active" : "waiting for permission") "

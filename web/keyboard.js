@@ -74,6 +74,14 @@
   const dotMat = K.flat('#2a2a27');
   const CAP_H = 0.058;
   const COLORS = { base: new THREE.Color('#f8f7ef'), mod: new THREE.Color('#e0ddd2'), orange: new THREE.Color('#e9b064') };
+  // Colour schemes for the 键盘颜色 setting: key tops (letters, modifiers, accents), their sides in
+  // the same order, and the case.
+  const THEMES = {
+    cream: { tops: ['#f8f7ef', '#e0ddd2', '#e9b064'], sides: ['#e6e3d8', '#cbc7ba', '#d39a4e'], case: '#252523', plate: '#2b2b28' },
+    dark: { tops: ['#4a4a46', '#383835', '#e9b064'], sides: ['#353532', '#2a2a28', '#c08a42'], case: '#1b1b1a', plate: '#222221' },
+    pink: { tops: ['#fdeef2', '#f6cdd9', '#ee8fb4'], sides: ['#efd5dd', '#e2b2c1', '#d6779d'], case: '#6b3f4e', plate: '#774857' },
+    mint: { tops: ['#eef8f2', '#c9e8d9', '#72c3a1'], sides: ['#d4ebdf', '#aed6c4', '#55a585'], case: '#2f4a40', plate: '#375449' },
+  };
   const HIT = new THREE.Color('#b9d84f');
   const keys = new Map();
   ROWS.forEach((row, r) => {
@@ -93,15 +101,44 @@
       dot.position.set(0, CAP_H + 0.001, -CAP * 0.36);
       holder.add(cap, dot);
       board.add(holder);
-      keys.set(code, { code, label, holder, top, base: COLORS[kind], x, z, down: false, glow: 0, depth: 0 });
+      keys.set(code, { code, label, holder, top, base: COLORS[kind], x, z, down: false, glow: 0, depth: 0, weight: 0 });
     }
   });
 
   const world = new THREE.Vector3();
   K.keyboard = {
     group: board,
-    releaseAll() { for (const key of keys.values()) key.down = false; },
+    releaseAll() { for (const key of keys.values()) { key.down = false; key.weight = 0; } },
+    // A cat lying on the board pushes the keys under it in a little, without lighting them up:
+    // every key within `half` of world x `cx` (`half` 0 lets them all back up), and any key under
+    // one of `points` (paws standing on it).
+    weigh(cx, half, points = []) {
+      for (const key of keys.values()) {
+        const x = key.x + board.position.x, z = key.z + board.position.z;
+        key.weight = Math.abs(x - cx) < half || points.some(p => Math.abs(p.x - x) < 0.1 && Math.abs(p.z - z) < 0.09) ? 1 : 0;
+      }
+    },
+    setTheme(name) {
+      const th = THEMES[name] || THEMES.cream;
+      ['base', 'mod', 'orange'].forEach((kind, i) => COLORS[kind].set(th.tops[i]));
+      [sideMat, modSide, orangeSide].forEach((m, i) => m.color.set(th.sides[i]));
+      caseMesh.material.color.set(th.case);
+      plate.material.color.set(th.plate);
+      for (const key of keys.values()) key.top.color.copy(key.base).lerp(HIT, key.glow);
+    },
+    randomLetter() {
+      const letters = [...keys.values()].filter(k => /^Key[A-Z]$/.test(k.code));
+      return letters[Math.floor(Math.random() * letters.length)];
+    },
     hitMeshes: [caseMesh, plate],
+    // World height of the tops of the keys at (x, z), weighed down, falling away to the desk past
+    // the edges of the board: what a cat lying here rests on.
+    surfaceAt(x, z) {
+      const lx = x - board.position.x, lz = z - board.position.z;
+      const out = Math.max(Math.abs(lx) - W / 2, Math.abs(lz) - D / 2);
+      const top = board.position.y + H + 0.01 + CAP_H - 0.024 - lz * Math.sin(board.rotation.x);
+      return K.mix(top, board.position.y, K.smooth(-0.02, 0.06, out));
+    },
     resolve(code) { return keys.get(code) || keys.get(ALIAS[code]) || null; },
     leftHand: code => LEFT_HAND.has(ALIAS[code] || code),
     // World-space top centre of a key, including how far it is pushed in.
@@ -111,7 +148,7 @@
     },
     update(dt) {
       for (const key of keys.values()) {
-        const depthTarget = key.down ? 0.032 : 0;
+        const depthTarget = Math.max(key.down ? 0.032 : 0, 0.024 * key.weight);
         key.depth += (depthTarget - key.depth) * K.approach(key.down ? 60 : 24, dt);
         key.glow += ((key.down ? 1 : 0) - key.glow) * K.approach(key.down ? 40 : 5, dt);
         key.holder.position.y = H + 0.01 - key.depth;
@@ -174,7 +211,15 @@
   button.position.set(0.004, onTop(0.04, ML * 0.4) + 0.001, ML * 0.08);
   button.renderOrder = 5;
   shape.add(shell('#f4f1e6', 0.03, -2), shell('#1d1d1b', 0.013, -1), dome, button, seam.mesh, wheel);
+  // Each click sends a ring out across the desk from under the mouse, in the keys' lit green.
+  const rippleMat = new THREE.MeshBasicMaterial({ color: '#b9d84f', transparent: true, opacity: 0, depthWrite: false });
+  const ripple = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 40).rotateX(-Math.PI / 2), rippleMat);
+  ripple.position.y = 0.004;
+  ripple.renderOrder = -3;
+  ripple.visible = false;
+  mouse.add(ripple);
   K.scene.add(mouse);
+  const bodyWhite = new THREE.Color('#ffffff'), bodyFlat = new THREE.Color('#f8f7f0'), bodyLit = new THREE.Color('#dff09a');
   // Cable: leaves the front of the mouse and curls away to the left, off the desk.
   const cable = new K.TaperTube(24, 6, K.flat('#2a2a27'), 1);
   K.scene.add(cable.mesh);
@@ -187,6 +232,8 @@
     offset: V(0, 0, 0),
     kick: V(0, 0, 0),
     pressed: 0,
+    rippleAge: 1,
+    flat: true,
     // The disc follows the real mouse with a little lag and slides back home when let go.
     follow: new K.Spring(V(0, 0, 0), 4, 0.75),
     update(dt, down) {
@@ -196,9 +243,17 @@
       if (this.offset.x > 0) this.offset.x = MOUSE_ROOM * Math.tanh(this.offset.x / MOUSE_ROOM);
       mouse.position.copy(MOUSE_HOME).add(this.offset);
       this.pressed += ((down ? 1 : 0) - this.pressed) * K.approach(30, dt);
-      buttonMat.opacity = 0.9 * this.pressed;
-      // A click squashes the mouse a touch under the paw.
-      shape.scale.set(1 + 0.03 * this.pressed, 1 - 0.1 * this.pressed, 1);
+      buttonMat.opacity = this.pressed;
+      // A click squashes the mouse down under the paw and tints it green, like a lit key.
+      shape.scale.set(1 + 0.06 * this.pressed, 1 - 0.2 * this.pressed, 1 + 0.03 * this.pressed);
+      bodyMat.color.copy(this.flat ? bodyFlat : bodyWhite).lerp(bodyLit, 0.75 * this.pressed);
+      this.rippleAge = Math.min(1, this.rippleAge + dt / 0.45);
+      ripple.visible = this.rippleAge < 1 && mouse.visible;
+      if (ripple.visible) {
+        const u = this.rippleAge;
+        ripple.scale.setScalar(K.mix(0.2, 0.4, 1 - (1 - u) ** 2));
+        rippleMat.opacity = 0.85 * (1 - u);
+      }
       // The cable hangs from the front of the mouse and sags on its way off the desk.
       mouse.updateMatrixWorld();
       cableStart.set(0, MH * 0.25, ML * 0.98).applyMatrix4(shape.matrixWorld);
@@ -208,10 +263,17 @@
         (1 - t) ** 2 * cableStart.y + 2 * (1 - t) * t * cableMid.y + t * t * cableEnd.y,
         (1 - t) ** 2 * cableStart.z + 2 * (1 - t) * t * cableMid.z + t * t * cableEnd.z), () => 0.011);
     },
+    // `cable` off hides the cord (the 鼠标线 setting) while the mouse itself stays.
+    cable: true,
+    // A press: shown at once, so a click that is over before the next frame still shows.
+    click() { this.pressed = 1; this.rippleAge = 0; },
+    setVisible(on) { mouse.visible = on; cable.mesh.visible = on && this.cable; },
+    setCable(on) { this.cable = on; cable.mesh.visible = on && mouse.visible; },
     setStyle(style) {
       const flat = style !== '3d';
+      this.flat = flat;
       bodyMat.vertexColors = !flat;
-      bodyMat.color.set(flat ? '#f8f7f0' : '#ffffff');
+      bodyMat.color.copy(flat ? bodyFlat : bodyWhite);
       bodyMat.needsUpdate = true;
     },
     // Where a paw rests on the mouse, in world space: on the palm hump at the back, so the
@@ -219,6 +281,98 @@
     top(out) {
       mouse.updateMatrixWorld();
       return out.copy(faceTop.set(0, MH + 0.045, -ML * 0.3)).applyMatrix4(shape.matrixWorld);
+    },
+  };
+
+  // A mug of coffee on the desk by the cat's side, clear of the keyboard and the mouse, for the cat
+  // to push off the edge. Drawn like the rest of the desk: flat colour, a dark ink line and a cream
+  // sticker edge. Blue, so it never reads as the white mouse; the handle faces out to the left,
+  // so its loop shows in silhouette, and steam curls up while it sits there. Fades so it can fall
+  // out of sight and come back later.
+  const cup = new THREE.Group();
+  const CUP_HOME = V(-1.0, 0.02, -0.28);
+  cup.position.copy(CUP_HOME);
+  const steam = [];
+  {
+    const fade = m => Object.assign(m, { transparent: true });
+    const R_CUP = 0.15, H_CUP = 0.29;
+    const mugMat = fade(K.flat('#9fcdea')), lipMat = fade(K.flat('#f8f7ef')), inkMat = fade(K.back('#1d1d1b')),
+      rimMat = fade(K.back('#f4f1e6')), coffeeMat = fade(K.flat('#6f4a30')), cremaMat = fade(K.flat('#a77a52')),
+      printMat = fade(K.flat('#f8f7ef'));
+    const mugGeo = new THREE.CylinderGeometry(R_CUP, R_CUP * 0.9, H_CUP, 36);
+    mugGeo.translate(0, H_CUP / 2, 0);
+    const mug = new THREE.Mesh(mugGeo, mugMat);
+    const ink = new THREE.Mesh(mugGeo, inkMat);
+    ink.scale.set(1.1, 1.04, 1.1);
+    ink.position.y = -0.005;
+    ink.renderOrder = -1;
+    const rim = new THREE.Mesh(mugGeo, rimMat);
+    rim.scale.set(1.22, 1.09, 1.22);
+    rim.position.y = -0.012;
+    rim.renderOrder = -2;
+    // The open top: a thick cream lip round dark coffee with a paler crema ring.
+    const lip = new THREE.Mesh(new THREE.TorusGeometry(R_CUP - 0.012, 0.014, 8, 36).rotateX(Math.PI / 2), lipMat);
+    lip.position.y = H_CUP;
+    const coffee = new THREE.Mesh(new THREE.CircleGeometry(R_CUP - 0.02, 32), coffeeMat);
+    coffee.rotation.x = -Math.PI / 2;
+    coffee.position.y = H_CUP + 0.002;
+    const crema = new THREE.Mesh(new THREE.RingGeometry(R_CUP * 0.42, R_CUP * 0.62, 32), cremaMat);
+    crema.rotation.x = -Math.PI / 2;
+    crema.position.y = H_CUP + 0.004;
+    // A D-shaped handle standing on edge, its loop facing the viewer.
+    const handleArc = r => new THREE.TorusGeometry(0.078, r, 10, 24, Math.PI).rotateZ(Math.PI / 2);
+    const handle = new THREE.Mesh(handleArc(0.019), mugMat);
+    handle.position.set(-R_CUP + 0.012, H_CUP * 0.52, 0);
+    const handleInk = new THREE.Mesh(handleArc(0.03), inkMat);
+    handleInk.position.copy(handle.position);
+    handleInk.renderOrder = -1;
+    const handleRim = new THREE.Mesh(handleArc(0.042), rimMat);
+    handleRim.position.copy(handle.position);
+    handleRim.renderOrder = -2;
+    // A paw print on the side towards the viewer: one pad and three toes.
+    const print = new THREE.Group();
+    const dot = (x, y, rx, ry) => {
+      const m = new THREE.Mesh(new THREE.CircleGeometry(1, 20), printMat);
+      m.position.set(x, y, 0); m.scale.set(rx, ry, 1);
+      print.add(m);
+    };
+    dot(0, -0.012, 0.036, 0.03);
+    dot(-0.038, 0.03, 0.014, 0.017); dot(0, 0.045, 0.014, 0.017); dot(0.038, 0.03, 0.014, 0.017);
+    print.position.set(0.01, H_CUP * 0.47, R_CUP * 0.96 + 0.004);
+    cup.add(handleRim, rim, handleInk, ink, mug, handle, lip, coffee, crema, print);
+    // Steam: two thin wavy wisps rising off the coffee, drifting and fading on a loop.
+    const steamMat = new THREE.MeshBasicMaterial({ color: '#fbfaf3', transparent: true, opacity: 0.85, depthWrite: false });
+    for (const x of [-0.035, 0.04]) {
+      const tube = new K.TaperTube(14, 5, steamMat.clone(), 3);
+      cup.add(tube.mesh);
+      steam.push({ tube, x, phase: x > 0 ? 1.7 : 0 });
+    }
+    cup.userData.mats = [mugMat, lipMat, inkMat, rimMat, coffeeMat, cremaMat, printMat];
+    cup.userData.top = H_CUP;
+  }
+  K.scene.add(cup);
+  K.cup = {
+    group: cup,
+    home: CUP_HOME,
+    radius: 0.15,
+    hitMeshes: [cup.children[4]],
+    opacity: 1,
+    setOpacity(a) {
+      this.opacity = a;
+      for (const m of cup.userData.mats) m.opacity = a;
+      cup.visible = a > 0.01;
+    },
+    // Moves the steam; `calm` 0 hides it (the cup is sliding or falling).
+    update(t, calm = 1) {
+      for (const s of steam) {
+        const life = (t * 0.45 + s.phase) % 1;
+        s.tube.mesh.material.opacity = 0.8 * Math.sin(life * Math.PI) * calm * this.opacity;
+        s.tube.mesh.visible = s.tube.mesh.material.opacity > 0.02;
+        if (!s.tube.mesh.visible) continue;
+        const rise = 0.06 + life * 0.08;
+        s.tube.update((u, out) => out.set(s.x + Math.sin(u * 5 + t * 2 + s.phase) * 0.025 * u,
+          cup.userData.top + rise + u * 0.2, 0), u => 0.012 * Math.sin(Math.PI * Math.min(1, u * 1.1 + 0.05)));
+      }
     },
   };
 })();

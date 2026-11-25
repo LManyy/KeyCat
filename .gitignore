@@ -20,3 +20,6 @@ win/out/
 # Linux build (GTK3 + WebKitGTK)
 linux/target/
 linux/nohup.out
+
+# Local project notes (docs/project/), not part of the repo
+docs/project/

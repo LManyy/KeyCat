@@ -4,7 +4,8 @@ import WebKit
 /// The web scene's host view. It keeps every mouse event for itself: the page never
 /// scrolls or selects; a press on the head pets the cat and a press elsewhere drags the window.
 final class WebCatView: WKWebView {
-    weak var app: AppDelegate?
+    weak var cat: CatPanel?
+    var app: AppDelegate? { cat?.app }
     private var dragStart: (mouse: CGPoint, origin: CGPoint)?
     private var petting = false
 
@@ -15,7 +16,7 @@ final class WebCatView: WKWebView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func scrollWheel(with event: NSEvent) {}
     override func menu(for event: NSEvent) -> NSMenu? { nil }
-    override func mouseMoved(with event: NSEvent) { app?.refreshCursor() }
+    override func mouseMoved(with event: NSEvent) { if let cat { app?.refreshCursor(cat) } }
 
     /// Event location in the page's CSS pixel space (top-left origin).
     func pagePoint(_ event: NSEvent) -> CGPoint {
@@ -24,13 +25,13 @@ final class WebCatView: WKWebView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let app, let window else { return }
-        if app.hit == "pet" {
+        guard let cat, let app, let window else { return }
+        if cat.hit == "pet" {
             petting = true
-            app.pet(down: true, x: pagePoint(event).x)
+            app.pet(cat, down: true, x: pagePoint(event).x)
         } else {
             dragStart = (NSEvent.mouseLocation, window.frame.origin)
-            app.dragging = true
+            cat.dragging = true
             NSCursor.closedHand.set()
         }
     }
@@ -42,19 +43,20 @@ final class WebCatView: WKWebView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard let cat, let app else { return }
         if petting {
             petting = false
-            app?.pet(down: false, x: 0)
+            app.pet(cat, down: false, x: 0)
         }
         if dragStart != nil {
             dragStart = nil
-            app?.dragging = false
-            app?.saveOrigin()
+            cat.dragging = false
+            app.saveOrigin(cat)
         }
-        app?.refreshCursor()
+        app.refreshCursor(cat)
     }
 
-    override func rightMouseDown(with event: NSEvent) { app?.showMenu(event) }
+    override func rightMouseDown(with event: NSEvent) { app?.showMenu(event, in: self) }
 }
 
 /// Breaks the retain cycle between WKUserContentController and the app delegate.

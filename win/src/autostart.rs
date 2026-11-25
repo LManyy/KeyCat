@@ -4,7 +4,8 @@
 //! there, so when KeyCat runs as administrator it starts from a scheduled task instead, which
 //! starts it elevated at login without a UAC prompt. Creating that task needs elevation. A
 //! normal start of KeyCat with the administrator setting on runs that same task too, so it comes
-//! up elevated without asking again.
+//! up elevated without asking again. Only a copy in Program Files gets the task: the task starts
+//! whatever is at its path, so that path must be one only administrators can change.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -19,7 +20,7 @@ mod imp {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Output};
 
-    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     use winreg::RegKey;
 
     use super::Mode;
@@ -57,9 +58,28 @@ mod imp {
         text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
     }
 
+    /// Whether this copy is inside Program Files, which only administrators can change; a copy
+    /// anywhere else could be swapped by any program the user runs, and the task would then start
+    /// that elevated. The folder comes from HKLM, not from the environment, which the user sets.
+    pub fn task_allowed() -> bool {
+        let Ok(exe) = std::env::current_exe() else { return false };
+        let Ok(dir) = RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion")
+            .and_then(|key| key.get_value::<String, _>("ProgramFilesDir"))
+        else {
+            return false;
+        };
+        let dir = dir.trim_end_matches('\\').to_lowercase();
+        let exe = exe.display().to_string().to_lowercase();
+        !dir.is_empty() && !exe.contains("..") && exe.starts_with(&format!("{dir}\\"))
+    }
+
     /// Whether the task exists and starts this very program, not a copy installed elsewhere
     /// before. Anything unexpected in the answer counts as no.
     pub fn task_runs_this() -> bool {
+        if !task_allowed() {
+            return false;
+        }
         let Ok(exe) = std::env::current_exe() else { return false };
         let want = format!("<Command>{}</Command>", escape(&exe.display().to_string())).to_lowercase();
         schtasks(&["/Query", "/TN", &task_name(), "/XML"])
@@ -111,7 +131,9 @@ mod imp {
         // schtasks reads task XML as UTF-16 with a byte order mark.
         let mut bytes = vec![0xFF, 0xFE];
         bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
-        let file = std::env::temp_dir().join("keycat-task.xml");
+        // Next to the program, where only administrators can write: in %TEMP% another program
+        // could change the file between writing it and schtasks reading it.
+        let file = exe.with_file_name("keycat-task.xml");
         std::fs::write(&file, bytes)?;
         let created = schtasks(&["/Create", "/F", "/TN", &task_name(), "/XML", &file.display().to_string()]);
         let _ = std::fs::remove_file(&file);
@@ -137,6 +159,10 @@ mod imp {
     }
 
     pub fn set(mode: Mode) -> Result<()> {
+        // Before anything is removed, so a refused task leaves start at login as it was.
+        if mode == Mode::Task && !task_allowed() {
+            return Err(Error::other("the login task is only for a copy in Program Files"));
+        }
         // Only one of the two may stay, or KeyCat would start twice.
         if mode != Mode::Task && task_exists() {
             check(schtasks(&["/Delete", "/F", "/TN", &task_name()])?)?;
@@ -168,6 +194,10 @@ mod imp {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "autostart is Windows-only"))
     }
 
+    pub fn task_allowed() -> bool {
+        false
+    }
+
     pub fn task_runs_this() -> bool {
         false
     }
@@ -177,4 +207,4 @@ mod imp {
     }
 }
 
-pub use imp::{current, run_task, set, task_runs_this};
+pub use imp::{current, run_task, set, task_allowed, task_runs_this};

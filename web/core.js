@@ -193,6 +193,7 @@ const K = {};
         }
       },
       meshes: [body.mesh, caps[0].end, caps[0].start],
+      rims: [rim.mesh, caps[1].end, caps[1].start],
     };
   };
 
@@ -230,7 +231,9 @@ const K = {};
     return entry;
   };
 
-  // Small sticker effects: 'anger' (manga cross-vein mark), 'bang' (impact burst), 'dust' (puff).
+  // Small sticker effects: 'anger' (manga cross-vein mark), 'bang' (impact burst), 'dust' (puff),
+  // 'heart', 'sweat' (anime sweat drop), 'card' (the copied thing the cat holds), 'check' (a save),
+  // 'marks' (three short strokes fanning out from a sudden move).
   K.fxTexture = kind => {
     const key = 'fx:' + kind;
     if (labelCache.has(key)) return labelCache.get(key).tex;
@@ -258,6 +261,50 @@ const K = {};
       g.closePath();
       g.fillStyle = '#fbfaf3'; g.fill();
       g.strokeStyle = '#1d1d1b'; g.lineWidth = 7; g.stroke();
+    } else if (kind === 'heart') {
+      g.beginPath();
+      g.moveTo(64, 108);
+      g.bezierCurveTo(14, 76, 10, 40, 34, 28);
+      g.bezierCurveTo(50, 20, 62, 30, 64, 42);
+      g.bezierCurveTo(66, 30, 78, 20, 94, 28);
+      g.bezierCurveTo(118, 40, 114, 76, 64, 108);
+      g.closePath();
+      g.fillStyle = '#f2788f'; g.fill();
+      g.strokeStyle = '#fbfaf3'; g.lineWidth = 9; g.stroke();
+      g.beginPath(); g.ellipse(42, 46, 8, 5, -0.6, 0, Math.PI * 2);
+      g.fillStyle = '#ffd3dc'; g.fill();
+    } else if (kind === 'sweat') {
+      g.beginPath();
+      g.moveTo(64, 10);
+      g.bezierCurveTo(84, 48, 98, 66, 98, 84);
+      g.arc(64, 84, 34, 0, Math.PI);
+      g.bezierCurveTo(30, 66, 44, 48, 64, 10);
+      g.closePath();
+      g.fillStyle = '#8fd0f2'; g.fill();
+      g.strokeStyle = '#fbfaf3'; g.lineWidth = 8; g.stroke();
+      g.beginPath(); g.ellipse(52, 86, 7, 12, 0.3, 0, Math.PI * 2);
+      g.fillStyle = '#e4f5fd'; g.fill();
+    } else if (kind === 'card') {
+      g.fillStyle = '#fbfaf3';
+      roundRect(g, 22, 14, 84, 100, 12); g.fill();
+      g.lineWidth = 7; g.strokeStyle = '#1d1d1b';
+      roundRect(g, 22, 14, 84, 100, 12); g.stroke();
+      g.lineWidth = 6; g.strokeStyle = '#b9b5a8';
+      for (const y of [42, 62, 82]) { g.beginPath(); g.moveTo(38, y); g.lineTo(y === 82 ? 70 : 90, y); g.stroke(); }
+    } else if (kind === 'check') {
+      g.beginPath(); g.arc(64, 64, 50, 0, Math.PI * 2);
+      g.fillStyle = '#8cc65a'; g.fill();
+      g.strokeStyle = '#fbfaf3'; g.lineWidth = 8; g.stroke();
+      g.beginPath(); g.moveTo(40, 66); g.lineTo(57, 82); g.lineTo(89, 46);
+      g.strokeStyle = '#fbfaf3'; g.lineWidth = 13; g.stroke();
+    } else if (kind === 'marks') {
+      // Fanning out up and to the left of the bottom right corner, as drawn beside a raised paw.
+      const strokes = () => {
+        g.beginPath();
+        for (const [x0, y0, x1, y1] of [[70, 100, 30, 78], [82, 84, 52, 40], [100, 76, 92, 26]]) { g.moveTo(x0, y0); g.lineTo(x1, y1); }
+      };
+      g.strokeStyle = '#1d1d1b'; g.lineWidth = 20; strokes(); g.stroke();
+      g.strokeStyle = '#f0b44c'; g.lineWidth = 9; strokes(); g.stroke();
     } else {
       g.beginPath(); g.arc(64, 64, 52, 0, Math.PI * 2);
       g.fillStyle = '#f4f1e6'; g.fill();
@@ -266,6 +313,70 @@ const K = {};
     const tex = new THREE.CanvasTexture(c);
     labelCache.set(key, { tex, aspect: 1 });
     return tex;
+  };
+
+  const FONT = '"PingFang SC", "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif';
+
+  // A speech bubble for what the cat says ("喵?", "休息一下吧"), its tail at the bottom left
+  // pointing back at the head. Sized to the text.
+  K.bubbleTexture = text => {
+    const key = 'bubble:' + text;
+    if (labelCache.has(key)) return labelCache.get(key);
+    const c = document.createElement('canvas');
+    const g = c.getContext('2d');
+    const font = `600 46px ${FONT}`;
+    g.font = font;
+    const w = Math.ceil(g.measureText(text).width) + 60;
+    c.width = Math.max(128, w + 16); c.height = 132;
+    g.font = font;
+    const bubble = () => {
+      roundRect(g, 8, 8, c.width - 16, 92, 40);
+      g.moveTo(40, 96); g.lineTo(26, 126); g.lineTo(70, 98);
+    };
+    g.fillStyle = '#fbfaf3'; g.strokeStyle = '#1d1d1b'; g.lineWidth = 6; g.lineJoin = 'round';
+    bubble(); g.fill(); g.stroke();
+    // Cover the seam where the tail joins the bubble.
+    g.fillStyle = '#fbfaf3'; g.fillRect(43, 94, 17, 9);
+    g.fillStyle = '#1d1d1b';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(text, c.width / 2, 56);
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = 4;
+    const entry = { tex, aspect: c.width / c.height };
+    labelCache.set(key, entry);
+    return entry;
+  };
+
+  // The pomodoro badge: a little tomato and the minutes left, or a cup of tea during the break.
+  K.badgeTexture = (text, kind) => {
+    const key = 'badge:' + kind + ':' + text;
+    if (labelCache.has(key)) return labelCache.get(key);
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 128;
+    const g = c.getContext('2d');
+    g.fillStyle = 'rgba(251,250,243,0.92)'; g.strokeStyle = '#1d1d1b'; g.lineWidth = 6;
+    roundRect(g, 6, 14, 244, 100, 50); g.fill(); g.stroke();
+    if (kind === 'focus') {
+      g.beginPath(); g.arc(62, 68, 32, 0, Math.PI * 2);
+      g.fillStyle = '#e2483d'; g.fill();
+      g.beginPath(); g.ellipse(52, 56, 8, 5, -0.6, 0, Math.PI * 2);
+      g.fillStyle = '#f59a8f'; g.fill();
+      g.fillStyle = '#5fae6a';
+      for (const a of [-0.9, 0, 0.9]) { g.beginPath(); g.ellipse(62 + Math.sin(a) * 12, 38, 6, 13, a, 0, Math.PI * 2); g.fill(); }
+    } else {
+      g.fillStyle = '#fbfaf3'; g.strokeStyle = '#1d1d1b'; g.lineWidth = 5;
+      roundRect(g, 34, 46, 50, 46, 10); g.fill(); g.stroke();
+      g.beginPath(); g.arc(88, 68, 11, -Math.PI / 2, Math.PI / 2); g.stroke();
+      g.fillStyle = '#c98a4b'; g.fillRect(38, 50, 42, 12);
+    }
+    g.fillStyle = '#1d1d1b';
+    g.font = `bold 52px ${FONT}`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(text, 170, 68);
+    const tex = new THREE.CanvasTexture(c);
+    const entry = { tex, aspect: 2 };
+    labelCache.set(key, entry);
+    return entry;
   };
 
   function roundRect(g, x, y, w, h, r) {

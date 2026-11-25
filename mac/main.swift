@@ -93,9 +93,54 @@ final class SettingsCheck {
     }
 }
 
+/// `KeyCat --pair-check <dir>` puts two cats side by side (nearly invisible), has the first swat
+/// the second, prints what each page knows about the other and snapshots both into <dir>.
+@MainActor
+final class PairCheck {
+    let delegate = AppDelegate()
+    let dir: URL
+
+    init(dir: URL) { self.dir = dir }
+
+    func start() {
+        delegate.statusReports = false
+        delegate.cats = [CatPanel(app: delegate, index: 0), CatPanel(app: delegate, index: 1)]
+        for (i, cat) in delegate.cats.enumerated() {
+            cat.panel.setFrame(CGRect(x: CGFloat(400 - i * 260), y: 200, width: designSize.width, height: designSize.height), display: true)
+            cat.panel.alphaValue = 0.02
+            cat.panel.orderFrontRegardless()
+        }
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { _ in MainActor.assumeIsolated { self.delegate.tick() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            self.delegate.cats[1].js("const f = cat.friendEvent; cat.friendEvent = k => { window.got = k; f(k); }; 1")
+            self.delegate.cats[0].js("window.webkit.messageHandlers.cat.postMessage({ friend: 'swat' })")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.report(0) }
+    }
+
+    func report(_ i: Int) {
+        guard i < delegate.cats.count else { exit(0) }
+        let view = delegate.cats[i].webView!
+        view.evaluateJavaScript("JSON.stringify({ friend: cat.state.friend, got: window.got || null })") { result, _ in
+            print("cat \(i + 1):", result ?? "nil")
+            view.takeSnapshot(with: nil) { image, _ in
+                if let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                    try? png.write(to: self.dir.appendingPathComponent("cat\(i + 1).png"))
+                }
+                self.report(i + 1)
+            }
+        }
+    }
+}
+
 let app = NSApplication.shared
 let arguments = CommandLine.arguments
-if let i = arguments.firstIndex(of: "--settings-check"), i + 1 < arguments.count {
+if let i = arguments.firstIndex(of: "--pair-check"), i + 1 < arguments.count {
+    let check = MainActor.assumeIsolated { PairCheck(dir: URL(fileURLWithPath: arguments[i + 1])) }
+    app.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated { check.start() }
+    app.run()
+} else if let i = arguments.firstIndex(of: "--settings-check"), i + 1 < arguments.count {
     let check = MainActor.assumeIsolated { SettingsCheck(output: URL(fileURLWithPath: arguments[i + 1])) }
     app.setActivationPolicy(.accessory)
     MainActor.assumeIsolated { check.start() }

@@ -19,6 +19,9 @@
   pawRimMat.depthWrite = false;
   const overlay = color => new THREE.MeshBasicMaterial({ color, depthTest: false });
   const toeMat = overlay('#b9b7ae');
+  // Toe beans on the soles. They sit on the fur and test depth, so a sole turned away or hidden
+  // behind the body hides them too.
+  const padMat = new THREE.MeshBasicMaterial({ color: '#f19aa6', polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
   const shineMat = overlay('#ffffff');
   // Per eye, so odd eyes can differ. Closed eyes are a line: iris-gold on black fur, dark on
   // light coats where gold would not show.
@@ -47,57 +50,169 @@
   const bodyGeo = new THREE.LatheGeometry(profile, 72);
   // The unbent shape, so markings stay on the fur while the spine bends.
   bodyGeo.setAttribute('rest', bodyGeo.attributes.position.clone());
+  // Both meshes keep unit scale; their shapes (the body a little flatter front to back, the
+  // outline a little bigger) are applied while placing the vertices on the spine.
   const bodyMesh = new THREE.Mesh(bodyGeo, fur.body);
-  bodyMesh.scale.set(1, 1, 0.82);
+  bodyMesh.userData.size = V(1, 1, 0.82);
   const rimGeo = bodyGeo.clone();
   const bodyRim = new THREE.Mesh(rimGeo, rimMat);
-  bodyRim.scale.set(1.045, 1.018, 0.86);
+  bodyRim.userData.size = V(1.045, 1.018, 0.86);
   bodyRim.renderOrder = -1;
   body.add(bodyRim, bodyMesh);
 
-  // The spine bends instead of the whole body tipping over: the haunches stay planted and the
-  // chest, neck and head shift sideways (x) and forward (z) more the higher up they are.
-  // `squash` sinks the upper body into a loaf.
+  // The body is a tube round a spine. Sitting, the spine stands up from the seat and bends: the
+  // haunches stay planted and the chest, neck and head shift sideways (x) and forward (z) more the
+  // higher up they are, and `squash` sinks the upper body into a loaf. Lying down, the spine itself
+  // takes a new shape (see `lying`): it runs along the desk from the hip, curved, and the round
+  // body cross-sections turn with it. So a lying cat has a lying cat's outline, long and low,
+  // instead of a sitting one tipped over.
+  // A point of the body is given in sitting terms: y is how far up the spine (`s`), x and z are
+  // its offset from the spine to the cat's side and front.
   const bend = { x: 0, z: 0, squash: 0 };
   const spineWeight = y => smooth(0.15, BODY_H, y) ** 1.6;
   const sink = y => smooth(0.2, BODY_H, y);
-  const rest = [bodyGeo, rimGeo].map(g => Float32Array.from(g.attributes.position.array));
+  // The lying pose, set by the behaviour. `amount` 0 sits, 1 lies. `path`: the lying spine as
+  // body-space points from the end of the rump (s = S0) to past the neck (s = S1); how long it is
+  // sets how long the lying cat is. `side`: the cat's left at the hips and at the neck, which with
+  // the path sets which way the belly faces (the two differing twists the hips against the chest).
+  // `kS`, `kF`: cross-section scale across the side and through the belly ([at hip, at neck]).
+  // `lead`: how far the chest goes down ahead of the hips. `floor(x, z)`: the world height of what
+  // it lies on. Nothing else holds a relaxed body up, so it settles onto that: flat where it
+  // touches, bulging out a little to the sides. `tail`, `hind`: see below.
+  const lying = { amount: 0, path: null, side: [V(0, 0, 1), V(0, 0, 1)], kS: [1, 1], kF: [1, 1], lead: 0.5,
+    floor: null, tail: null, hind: null };
+  // The spine is sampled from a little behind the seat (for the rounded rump) to past the neck.
+  const S0 = -0.45, S1 = 1.5, NS = 40, DS = (S1 - S0) / NS;
+  const spine = Array.from({ length: NS + 1 }, () => ({ p: V(0, 0, 0), S: V(1, 0, 0), T: V(0, 1, 0), F: V(0, 0, 1), kS: 1, kF: 1, w: 0, q: new THREE.Quaternion() }));
+  const qLie = new THREE.Quaternion(), qI = new THREE.Quaternion(), basis = new THREE.Matrix4();
+  const tS = V(0, 0, 0), tT = V(0, 0, 0), tF = V(0, 0, 0), tA = V(0, 0, 0);
+  const lieCurve = new THREE.CatmullRomCurve3([V(0, 0, 0), V(0, 1, 0)], false, 'centripetal'), hipAt = V(0, 0, 0);
+  // How lain-down the spine is at `s`: the chest leads, the hips follow.
+  const lieAt = s => lying.path ? smooth(0, 1, lying.amount * (1 + lying.lead) - lying.lead * (1 - K.clamp(s / BODY_H, 0, 1))) : 0;
+  function buildSpine() {
+    const L = lying, i0 = Math.round(-S0 / DS), on = L.path && L.amount > 0;
+    let len = 1;
+    if (on) {
+      lieCurve.points = L.path;
+      lieCurve.updateArcLengths();
+      len = lieCurve.getLength() / (S1 - S0);
+      lieCurve.getPointAt(-S0 / (S1 - S0), hipAt);
+    } else hipAt.set(0, 0, 0);
+    for (let i = 0; i <= NS; i++) {
+      const sp = spine[i], sv = S0 + i * DS, u = K.clamp(sv / BODY_H, 0, 1), w = on ? lieAt(sv) : 0;
+      sp.w = w;
+      if (w > 0) {
+        // Lying frame: along the path, the belly facing away from the cat's left.
+        lieCurve.getTangentAt(i / NS, tT);
+        tS.lerpVectors(L.side[0], L.side[1], u);
+        tF.crossVectors(tS, tT).normalize();
+        tS.crossVectors(tT, tF);
+        basis.makeBasis(tS, tT, tF);
+        qLie.setFromRotationMatrix(basis);
+        sp.q.copy(qI).slerp(qLie, w);
+      } else sp.q.identity();
+      sp.S.set(1, 0, 0).applyQuaternion(sp.q);
+      sp.T.set(0, 1, 0).applyQuaternion(sp.q);
+      sp.F.set(0, 0, 1).applyQuaternion(sp.q);
+      sp.kS = mix(1, mix(L.kS[0], L.kS[1], u), w);
+      sp.kF = mix(1, mix(L.kF[0], L.kF[1], u), w);
+    }
+    // Walk the spine out from the seat both ways. Sitting, it is straight up; lying, it walks the
+    // path. The bend and squash of the sitting pose are added on top, fading out as it lies down.
+    spine[i0].p.copy(hipAt).multiplyScalar(spine[i0].w);
+    for (let i = i0 + 1; i <= NS; i++) spine[i].p.copy(spine[i - 1].p).addScaledVector(spine[i - 1].T, DS * mix(1, len, spine[i - 1].w));
+    for (let i = i0 - 1; i >= 0; i--) spine[i].p.copy(spine[i + 1].p).addScaledVector(spine[i + 1].T, -DS * mix(1, len, spine[i + 1].w));
+    for (let i = 0; i <= NS; i++) {
+      const sv = S0 + i * DS, k = 1 - spine[i].w, y = Math.max(0, sv), sw = spineWeight(y);
+      spine[i].p.x += bend.x * sw * k;
+      spine[i].p.y -= y * bend.squash * sink(y) * k;
+      spine[i].p.z += bend.z * sw * k;
+    }
+  }
+  // Body-space position of a point given in sitting terms. Past the ends the spine carries on straight.
+  const sampleAt = sv => {
+    const f = (sv - S0) / DS, i = K.clamp(Math.floor(f), 0, NS - 1);
+    return [spine[i], spine[i + 1], f - i];
+  };
+  // `place` also leaves the spine point it measured from and how lain-down that is.
+  const placedAt = V(0, 0, 0);
+  let placedW = 0;
+  function place(x, y, z, out, sv = y) {
+    const [a, b, f] = sampleAt(sv);
+    const kS = mix(a.kS, b.kS, f), kF = mix(a.kF, b.kF, f);
+    placedAt.lerpVectors(a.p, b.p, f);
+    placedW = mix(a.w, b.w, f);
+    return out.copy(placedAt)
+      .addScaledVector(tS.lerpVectors(a.S, b.S, f), x * kS)
+      .addScaledVector(tF.lerpVectors(a.F, b.F, f), z * kF);
+  }
+  const restPos = [bodyGeo, rimGeo].map(g => Float32Array.from(g.attributes.position.array));
+  const spread = V(0, 0, 0);
   function bendBody() {
+    buildSpine();
+    const fl = lying.amount > 0.001 && lying.floor, bp = body.position;
     [[bodyGeo, bodyMesh], [rimGeo, bodyRim]].forEach(([g, mesh], gi) => {
-      const src = rest[gi], pos = g.attributes.position.array, sx = mesh.scale.x, sz = mesh.scale.z;
+      const src = restPos[gi], pos = g.attributes.position.array, sc = mesh.userData.size, v = tA;
       for (let i = 0; i < pos.length; i += 3) {
-        const y = src[i + 1], w = spineWeight(y);
-        pos[i] = src[i] + bend.x * w / sx;
-        pos[i + 1] = y * (1 - bend.squash * sink(y));
-        pos[i + 2] = src[i + 2] + bend.z * w / sz;
+        const x = src[i] * sc.x, y = src[i + 1] * sc.y, z = src[i + 2] * sc.z;
+        // Lying, the flat seat would show as a flat end: it rounds off into a rump.
+        const r = Math.hypot(x, z / 0.82), w0 = spine[Math.round(-S0 / DS)].w;
+        const sv = y - w0 * 0.26 * Math.sqrt(Math.max(0, 1 - (r / 0.66) ** 2)) * (1 - smooth(0.05, 0.4, y));
+        place(x, y, z, v, sv);
+        if (fl && placedW > 0) {
+          // Settling onto the surface: whatever would sink into it rests on it instead, flattening
+          // the underside, and the flesh pushed up spreads out sideways. The outline stops a hair
+          // below the fill, so a thin line still shows along the contact.
+          const fy = fl(v.x + bp.x, v.z + bp.z) - bp.y - (gi ? 0.014 : 0);
+          const lift = (smax(v.y, fy, 0.07) - v.y) * placedW;
+          if (lift > 0) {
+            spread.set(v.x - placedAt.x, 0, v.z - placedAt.z);
+            const l = spread.length();
+            if (l > 1e-4) v.addScaledVector(spread, 0.5 * lift / l);
+            v.y += lift;
+          }
+        }
+        pos[i] = v.x; pos[i + 1] = v.y; pos[i + 2] = v.z;
       }
       g.attributes.position.needsUpdate = true;
+      if (lying.amount > 0.001) g.computeVertexNormals();
       g.computeBoundingSphere();
     });
   }
   // The collar rides the bent neck and tips with the slope of the spine there. When the head nods
   // down (asleep, hunched over the keys) the chin tucks into the neck and pushes the collar lower
   // and back, so it never ends up in front of the face. Called after the head pose is set.
+  const collarTilt = new THREE.Quaternion(), collarEuler = new THREE.Euler();
   function placeCollar() {
     if (!collar.visible) return;
-    const y = COLLAR_Y - 0.3 * K.clamp(headPivot.rotation.x + 0.1, 0, 0.6);
+    const y = COLLAR_Y - 0.3 * K.clamp(headPivot.rotation.x + 0.1, 0, 0.6) * (1 - lying.amount);
     // Lower down the chest is wider, so the band widens with it to stay on the fur.
+    const [a, b, f] = sampleAt(y);
     const s = radiusAt(y) / collarR;
-    collar.scale.set(s, 1, s);
+    collar.scale.set(s * mix(a.kS, b.kS, f), 1, s * mix(a.kF, b.kF, f) / 1);
+    place(0, y, 0, collar.position);
     const w = spineWeight(y), dw = (spineWeight(y + 0.01) - spineWeight(y - 0.01)) / 0.02;
-    collar.position.set(bend.x * w, y * (1 - bend.squash * sink(y)), bend.z * w);
     // Only part of the spine's slope: the neck stays fairly upright under the level head, and a
     // steeply tipped band reads as a sash. The bell hangs plumb whatever the band does.
-    const tx = K.clamp(Math.atan(bend.z * dw) * 0.5, -0.18, 0.18), tz = K.clamp(-Math.atan(bend.x * dw) * 0.5, -0.18, 0.18);
-    collar.rotation.set(tx, 0, tz);
+    const k = 1 - a.w;
+    const tx = K.clamp(Math.atan(bend.z * dw) * 0.5, -0.18, 0.18) * k, tz = K.clamp(-Math.atan(bend.x * dw) * 0.5, -0.18, 0.18) * k;
+    collar.quaternion.copy(a.q).slerp(b.q, f).multiply(collarTilt.setFromEuler(collarEuler.set(tx, 0, tz)));
     bell.rotation.set(-tx, 0, -tz);
   }
-  // A point given in the unbent body frame, moved with the spine and placed in the world.
+  // A point given in sitting terms, moved with the spine and placed in the world.
   function attach(local, out) {
-    const w = spineWeight(local.y);
     body.updateMatrixWorld();
-    return out.set(local.x + bend.x * w, local.y * (1 - bend.squash * sink(local.y)), local.z + bend.z * w)
-      .applyMatrix4(body.matrixWorld);
+    return place(local.x, local.y, local.z, out).applyMatrix4(body.matrixWorld);
+  }
+  // The spine's frame at `s` in the world: `T` along it towards the head, `F` out of the belly, `S`
+  // to the cat's left. For placing paws and the head when lying.
+  function frameAt(sv, out = { p: V(0, 0, 0), S: V(0, 0, 0), T: V(0, 0, 0), F: V(0, 0, 0) }) {
+    body.updateMatrixWorld();
+    const [a, b, f] = sampleAt(sv);
+    out.p.lerpVectors(a.p, b.p, f).applyMatrix4(body.matrixWorld);
+    for (const k of ['S', 'T', 'F']) out[k].lerpVectors(a[k], b[k], f).transformDirection(body.matrixWorld);
+    out.w = mix(a.w, b.w, f);
+    return out;
   }
 
   // Paw: a soft bean, flat underneath and fuller at the toes, with two toe creases on top.
@@ -111,6 +226,11 @@
   }
   const toeGeo = new THREE.PlaneGeometry(0.03, 0.34);
   toeGeo.rotateX(-Math.PI / 2);
+  // The sole faces down: one round main pad towards the heel and four beans in an arc towards the
+  // toes, each set just outside the curved underside.
+  const padGeo = new THREE.CircleGeometry(1, 20);
+  padGeo.rotateX(Math.PI / 2);
+  const PADS = [[0, -0.18, 0.4, 0.32], [-0.6, 0.3, 0.17, 0.2], [-0.22, 0.56, 0.17, 0.2], [0.22, 0.56, 0.17, 0.2], [0.6, 0.3, 0.17, 0.2]];
   function makePaw(parent, order) {
     const paw = new THREE.Mesh(pawGeo, pawMat);
     paw.renderOrder = order + 2;
@@ -123,6 +243,13 @@
       toe.renderOrder = order + 3;
       paw.add(toe);
     }
+    for (const [x, z, rx, rz] of PADS) {
+      const pad = new THREE.Mesh(padGeo, padMat);
+      pad.position.set(x * (1 + 0.12 * z), -0.45 * Math.sqrt(Math.max(0, 1 - x * x - z * z)) - 0.012, z);
+      pad.scale.set(rx, 1, rz);
+      pad.renderOrder = order + 3;
+      paw.add(pad);
+    }
     parent.add(rim, paw);
     return { paw, rim };
   }
@@ -134,8 +261,140 @@
     rim.scale.set(0.186, 0.114, 0.166);
     rim.position.copy(paw.position);
     rim.rotation.copy(paw.rotation);
+    paw.userData.rim = rim;
+    paw.userData.home = paw.position.clone();
     return paw;
   });
+  // Sitting, only the hind paws show, tucked under the front of the haunches. Lying, the leg
+  // shows too, so each has one, hidden while sitting. This is a chibi cat: a leg is a short soft
+  // stub coming out of the round body, bent once, ending in a big mitten paw. `lying.hind` gives
+  // where each leg bends (`knee`) and its paw, in body space, and optionally which way the toes
+  // point (`toes`) and the top of the paw faces (`top`), so a sole can be turned to show its beans.
+  // Lying, the cat is one round lump and a limb lying against it is not lined off from it: the
+  // limb's outline goes to the back, like the body's, so it only shows round the outside of the
+  // whole cat (`outer` on). Sitting, arms and legs keep their own darker line.
+  function outlineOutside(limb, on, mat, order) {
+    if (limb.line.outer === on) return;
+    limb.line.outer = on;
+    for (const m of limb.rims) { m.material = on ? rimMat : mat; m.renderOrder = on ? -1 : order; }
+  }
+  const hindLegs = [-1, 1].map(s => {
+    const before = body.children.length;
+    const line = { outer: false };
+    const leg = K.limb(body, { segments: 30, radial: 12, fill: fur.arms[s < 0 ? 0 : 1], outline: armRimMat, order: 1,
+      edge: t => line.outer ? 0.022 : mix(-0.03, 0.012, smooth(0.06, 0.2, t)) });
+    leg.line = line;
+    leg.all = body.children.slice(before);
+    for (const m of leg.all) m.visible = false;
+    leg.joints = [V(0, 0, 0), V(0, 0, 0), V(0, 0, 0), V(0, 0, 0)];
+    leg.runs = Array.from({ length: 5 }, () => ({ a: V(0, 0, 0), b: V(0, 0, 0), c: V(0, 0, 0), bent: false, len: 0 }));
+    return leg;
+  });
+  // A limb through `leg.joints` as straight runs meeting in tight rounded corners (`radii`, one per
+  // joint), so a knee or hock reads as a joint rather than one long bend. `jointAt` samples it by
+  // length; `leg.at` holds how far along each joint is.
+  const runIn = V(0, 0, 0), runOut = V(0, 0, 0);
+  function setJoints(leg, radii) {
+    const P = leg.joints, R = leg.runs;
+    let n = 0, total = 0, from = P[0];
+    leg.at = [];
+    for (let i = 1; i < P.length - 1; i++) {
+      const lin = runIn.subVectors(P[i], P[i - 1]).length(), lout = runOut.subVectors(P[i + 1], P[i]).length();
+      runIn.divideScalar(lin || 1);
+      runOut.divideScalar(lout || 1);
+      const r = Math.min(radii[i - 1], 0.45 * lin, 0.45 * lout);
+      const line = R[n++], turn = R[n++];
+      line.bent = false;
+      line.a.copy(from);
+      line.b.copy(P[i]).addScaledVector(runIn, -r);
+      line.len = line.a.distanceTo(line.b);
+      turn.bent = true;
+      turn.a.copy(line.b);
+      turn.c.copy(P[i]);
+      turn.b.copy(P[i]).addScaledVector(runOut, r);
+      turn.len = r * (1 + runIn.dot(runOut) * 0.5 + 0.5);
+      total += line.len;
+      leg.at.push(total + turn.len / 2);
+      total += turn.len;
+      from = turn.b;
+    }
+    const last = R[n++];
+    last.bent = false;
+    last.a.copy(from);
+    last.b.copy(P[P.length - 1]);
+    last.len = last.a.distanceTo(last.b);
+    total += last.len;
+    leg.n = n;
+    leg.total = total;
+    leg.at = leg.at.map(d => d / total);
+  }
+  function jointAt(leg, t, out) {
+    let d = t * leg.total;
+    for (let i = 0; i < leg.n; i++) {
+      const r = leg.runs[i];
+      if (d <= r.len || i === leg.n - 1) {
+        const u = r.len > 0 ? Math.min(1, d / r.len) : 0, v = 1 - u;
+        if (!r.bent) return out.lerpVectors(r.a, r.b, u);
+        return out.set(v * v * r.a.x + 2 * v * u * r.c.x + u * u * r.b.x, v * v * r.a.y + 2 * v * u * r.c.y + u * u * r.b.y,
+          v * v * r.a.z + 2 * v * u * r.c.z + u * u * r.b.z);
+      }
+      d -= r.len;
+    }
+    return out;
+  }
+  const legQ = new THREE.Quaternion(), legDir = V(0, 0, 0), legFlat = V(0, 0, 0), Y_UP = V(0, 1, 0);
+  const hipJoint = V(0, 0, 0), legFoot = V(0, 0, 0), legLocal = V(0, 0, 0);
+  // A paw at the end of a limb carries on the way the limb arrives at it (`dir`), its top turned
+  // up and towards the viewer (or towards `up`): a paw hanging off an edge points its toes at the
+  // floor and shows its back, one lying on the keys lies flat.
+  const pawY = V(0, 0, 0), pawX = V(0, 0, 0), pawZ = V(0, 0, 0), pawUp = V(0, 1, 0.6), pawBasisM = new THREE.Matrix4();
+  function pawBasis(dir, out, up = pawUp) {
+    pawZ.copy(dir).normalize();
+    pawY.copy(up).addScaledVector(pawZ, -pawZ.dot(up));
+    if (pawY.lengthSq() < 1e-4) pawY.set(0, 1, 0);
+    pawY.normalize();
+    pawX.crossVectors(pawY, pawZ);
+    return out.setFromRotationMatrix(pawBasisM.makeBasis(pawX, pawY, pawZ));
+  }
+  // Hind paws can twitch (in a dream); `offsets` are added to each one's place, in sitting terms
+  // sitting and body space lying.
+  function kickHind(offsets) {
+    const w = lieAt(0.1);
+    hind.forEach((paw, i) => {
+      legLocal.copy(paw.userData.home).add(offsets[i]);
+      place(legLocal.x, legLocal.y, legLocal.z, paw.position);
+      place((i ? 1 : -1) * 0.3, 0.34, 0.08, hipJoint);
+      paw.quaternion.setFromAxisAngle(V(0, 1, 0), (i ? 1 : -1) * 0.25);
+      const pose = lying.hind && lying.hind[i], [, knee, mid] = hindLegs[i].joints;
+      knee.lerpVectors(hipJoint, paw.position, 0.5);
+      if (pose && w > 0) {
+        paw.position.lerp(legFoot.copy(pose.paw).add(offsets[i]), w);
+        knee.lerp(pose.knee, w);
+        // Unless the pose turns it, the paw lies flat with its toes forward, swung a little the
+        // way the leg comes into it (a leg coming straight down would stand it on its toes).
+        legDir.subVectors(paw.position, knee).normalize();
+        legFlat.set(legDir.x, 0, Math.max(legDir.z, 0) + 0.6);
+        paw.quaternion.slerp(pawBasis(pose.toes || legFlat, legQ, pose.top || Y_UP), w);
+      }
+      mid.lerpVectors(knee, paw.position, 0.5);
+      paw.scale.set(0.17, 0.1, 0.15);
+      paw.userData.rim.scale.copy(paw.scale).addScalar(0.016);
+      paw.userData.rim.position.copy(paw.position);
+      paw.userData.rim.quaternion.copy(paw.quaternion);
+      const leg = hindLegs[i], show = w > 0.15;
+      for (const m of leg.all) m.visible = show;
+      if (!show) return;
+      outlineOutside(leg, true, armRimMat, 0);
+      // A soft stub from inside the haunch, round through the bend, into the back of the paw's
+      // heel, so it never shows through the sole.
+      const pts = leg.joints;
+      pts[0].copy(hipJoint);
+      pts[3].copy(paw.position).addScaledVector(legDir.set(0, 1, 0).applyQuaternion(paw.quaternion), 0.07)
+        .addScaledVector(legDir.set(0, 0, 1).applyQuaternion(paw.quaternion), -0.08);
+      setJoints(leg, [0.3, 0.3]);
+      leg.update((t, out) => jointAt(leg, t, out), t => mix(0.15, 0.09, smooth(0, 1, t)));
+    });
+  }
 
   // Head on a pivot at the neck so it can tilt, nod and rub.
   const headPivot = new THREE.Group();
@@ -193,6 +452,7 @@
   collar.add(bell);
   collar.visible = false;
   body.add(collar);
+  const collarParts = [...collar.children];
   const head = new THREE.Group();
   head.position.set(0, 0.42, 0.04);
   headPivot.add(head);
@@ -208,6 +468,7 @@
   headGeo.computeVertexNormals();
   const headMesh = new THREE.Mesh(headGeo, fur.head);
   headMesh.scale.copy(R);
+  headMesh.renderOrder = 0.6;   // after the ear outlines, see `ears`
   const headRim = new THREE.Mesh(headGeo, rimMat);
   headRim.scale.set(R.x + 0.024, R.y + 0.024, R.z + 0.02);
   headRim.renderOrder = -1;
@@ -325,7 +586,11 @@
     e.scale.set(1, 1, 0.5);
     const r = new THREE.Mesh(undefined, rimMat);
     r.scale.set(1, 1, 0.5 + 0.06);
-    r.renderOrder = -1;
+    // The ear's outline is drawn after the body and before the head and the ear itself, so where
+    // an ear stands in front of the body (lying over the keys, the back rises behind the head) it
+    // still shows round the ear, instead of being covered like the outlines inside the body.
+    r.renderOrder = 0.5;
+    e.renderOrder = 0.6;
     g.add(r, e);
     head.add(g);
     // `tilt`: how far the ear leans out at rest; the behaviour adds its swivel to it.
@@ -360,8 +625,6 @@
       shine.add(d);
     }
     const arc = new K.TaperTube(16, 6, lidMat, 11);
-    arc.update((t, out) => out.set(mix(-0.12, 0.12, t), -0.045 * Math.sin(t * Math.PI), 0.004),
-      t => 0.011 + 0.006 * Math.sin(t * Math.PI));
     arc.mesh.visible = false;
     g.add(iris, pupil, shine, arc.mesh);
     const blush = new THREE.Mesh(disc, blushMat);
@@ -370,8 +633,19 @@
     blush.renderOrder = 10;
     g.add(blush);
     head.add(g);
-    return { s, group: g, iris, pupil, shine, arc: arc.mesh };
+    const eye = { s, group: g, iris, pupil, shine, arc: arc.mesh, lid: arc, lidK: 0 };
+    setLid(eye, 1);
+    return eye;
   });
+  // The closed eye's line: `k` 1 is the soft ‿ of a sleeping or contented cat, -1 the ^ of a happy
+  // squeeze (a bit bolder), in between blends.
+  function setLid(eye, k) {
+    if (Math.abs(eye.lidK - k) < 0.02) return;
+    eye.lidK = k;
+    const bold = smooth(0.2, -1, k);
+    eye.lid.update((t, out) => out.set(mix(-0.12, 0.12, t), -0.045 * k * Math.sin(t * Math.PI) + 0.0125 * (k - 1), 0.004),
+      t => (0.011 + 0.004 * bold) + (0.006 + 0.004 * bold) * Math.sin(t * Math.PI));
+  }
 
   // Whiskers: three thin strands per side, from the cheek out past the face.
   const whiskers = [];
@@ -401,6 +675,7 @@
     const noseMesh = new THREE.Mesh(new THREE.ShapeGeometry(nose, 10), noseMat);
     noseMesh.position.set(0, NY, faceZ(0, NY) + 0.006);
     noseMesh.quaternion.setFromUnitVectors(V(0, 0, 1), V(0, NY / (R.y * R.y), faceZ(0, NY) / (R.z * R.z)).normalize());
+    noseMesh.scale.setScalar(1.2);
     noseMesh.renderOrder = 12;
     const mouth = new K.TaperTube(24, 4, mouthMat, 12);
     mouth.update((t, out) => {
@@ -411,15 +686,160 @@
   }
   head.add(face);
 
+  // A yawn: the mouth opens into a big dark oval under the nose with a pink tongue, wider than
+  // tall at first and then stretching down towards the chin, the way a chibi yawn is drawn.
+  // Shown on every coat, black too, where the face itself is left off.
+  const yawn = new THREE.Group();
+  {
+    const YY = -0.25;
+    const inside = new THREE.Mesh(disc, overlay('#5b2128'));
+    inside.scale.set(0.105, 0.1, 1);
+    const edge = new THREE.Mesh(disc, overlay('#1d1d1b'));
+    edge.scale.set(0.122, 0.117, 1);
+    const tongue = new THREE.Mesh(disc, overlay('#ee8f98'));
+    tongue.scale.set(0.07, 0.042, 1);
+    tongue.position.y = -0.052;
+    const fangs = [-1, 1].map(s => {
+      const f = new THREE.Mesh(new THREE.CircleGeometry(1, 3), overlay('#fbfaf3'));
+      f.scale.set(0.02, 0.03, 1);
+      f.rotation.z = -Math.PI / 2;
+      f.position.set(s * 0.055, 0.075, 0);
+      return f;
+    });
+    edge.renderOrder = 13; inside.renderOrder = 14; tongue.renderOrder = 15;
+    for (const f of fangs) f.renderOrder = 15;
+    yawn.add(edge, inside, tongue, ...fangs);
+    yawn.position.set(0, YY, faceZ(0, YY) + 0.008);
+    yawn.quaternion.setFromUnitVectors(V(0, 0, 1), V(0, YY / (R.y * R.y), faceZ(0, YY) / (R.z * R.z)).normalize());
+    yawn.scale.set(1, 0.001, 1);
+    yawn.visible = false;
+    yawn.userData.y = YY;
+  }
+  head.add(yawn);
+  // Washing, the tip of the tongue comes out under the "ω" with each lick, down onto the paw.
+  const lick = new THREE.Group();
+  {
+    const LY = -0.21;
+    const tip = new THREE.Mesh(disc, overlay('#ee8f98'));
+    const line = new THREE.Mesh(disc, overlay('#c9606e'));
+    tip.scale.set(0.03, 1, 1); tip.position.y = -0.6;
+    line.scale.set(0.038, 1.12, 1); line.position.y = -0.6;
+    line.renderOrder = 13; tip.renderOrder = 14;
+    lick.add(line, tip);
+    lick.position.set(0, LY, faceZ(0, LY) + 0.01);
+    lick.quaternion.setFromUnitVectors(V(0, 0, 1), V(0, LY / (R.y * R.y), faceZ(0, LY) / (R.z * R.z)).normalize());
+    lick.visible = false;
+  }
+  head.add(lick);
+  function setLick(out) {
+    lick.visible = out > 0.02;
+    lick.scale.set(1, 0.06 * Math.max(0.02, out), 1);
+  }
+  function setYawn(open) {
+    yawn.visible = open > 0.02;
+    yawn.scale.set(0.7 + 0.7 * open, Math.max(0.001, 1.8 * open), 1);
+    // Opening wide, it grows downwards so the top stays clear of the nose.
+    yawn.position.y = yawn.userData.y - 0.08 * open;
+  }
+
+  // Holiday outfits on the head and neck: a Santa hat, a witch's hat, a party hat for the day
+  // the two of you met, a red scarf for the Spring Festival.
+  const outfit = { kind: null };
+  const hats = {};
+  {
+    const shellOf = (geo, color, grow, order) => {
+      const m = new THREE.Mesh(geo, K.back(color));
+      m.scale.setScalar(1 + grow);
+      m.renderOrder = order;
+      return m;
+    };
+    const cone = (r, h, color) => {
+      const g = new THREE.ConeGeometry(r, h, 32);
+      g.translate(0, h / 2, 0);
+      const fill = new THREE.Mesh(g, K.flat(color));
+      fill.renderOrder = 16;
+      return [shellOf(g, '#1d1d1b', 0.07, 15), fill];
+    };
+    const ball = (r, color, y) => {
+      const g = new THREE.SphereGeometry(r, 16, 12);
+      const m = new THREE.Mesh(g, K.flat(color));
+      m.position.y = y; m.renderOrder = 18;
+      const ink = shellOf(g, '#1d1d1b', 0.22, 17);
+      ink.position.y = y;
+      return [ink, m];
+    };
+    const ring = (r, tube, color, order = 18) => {
+      const g = new THREE.TorusGeometry(r, tube, 10, 32);
+      g.rotateX(Math.PI / 2);
+      const m = new THREE.Mesh(g, K.flat(color));
+      m.renderOrder = order;
+      const ink = new THREE.Mesh(new THREE.TorusGeometry(r, tube + 0.012, 10, 32).rotateX(Math.PI / 2), K.back('#1d1d1b'));
+      ink.renderOrder = order - 1;
+      return [ink, m];
+    };
+    const make = (parts, x, y, tilt) => {
+      const g = new THREE.Group();
+      g.add(...parts);
+      g.position.set(x, y, 0.02);
+      g.rotation.set(-0.15, 0, tilt);
+      g.visible = false;
+      head.add(g);
+      return g;
+    };
+    // Santa: a floppy red cone, white brim and bobble, tipped to one side between the ears.
+    hats.xmas = make([...cone(0.28, 0.56, '#d9483b'), ...ring(0.28, 0.065, '#fbf9f3'), ...ball(0.085, '#fbf9f3', 0.56)], 0.06, 0.3, -0.38);
+    // Witch: a wide flat brim, a tall black cone and a purple band.
+    const brimGeo = new THREE.CylinderGeometry(0.45, 0.45, 0.025, 40);
+    const brim = new THREE.Mesh(brimGeo, K.flat('#2b2440')); brim.renderOrder = 16;
+    hats.halloween = make([shellOf(brimGeo, '#f6f3e8', 0.06, 14), brim, ...cone(0.22, 0.6, '#2b2440'),
+      ...ring(0.21, 0.035, '#9a6bd1', 19)], 0.04, 0.38, -0.25);
+    // Party hat: a striped cone with a yellow pompom.
+    const stripes = document.createElement('canvas');
+    stripes.width = 64; stripes.height = 128;
+    const sg = stripes.getContext('2d');
+    ['#6eb2e6', '#fbf9f3', '#ee8fb4', '#fbf9f3', '#93c255', '#fbf9f3'].forEach((c, i) => { sg.fillStyle = c; sg.fillRect(0, i * 22, 64, 22); });
+    const party = cone(0.21, 0.54, '#ffffff');
+    party[1].material = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(stripes) });
+    hats.birthday = make([...party, ...ball(0.075, '#f2c94c', 0.54)], 0.05, 0.32, -0.3);
+  }
+  // The scarf rides with the collar on the neck: a thick red band and one end hanging down the
+  // chest, swinging a little.
+  const scarf = new THREE.Group();
+  const scarfMat = K.towardEye(K.flat('#d9363e'), 0.07), scarfInk = K.towardEye(K.back('#1d1d1b'), 0.07);
+  const scarfBand = K.limb(scarf, { segments: 40, radial: 10, fill: scarfMat, outline: scarfInk, order: 2, edge: 0.012 });
+  const scarfEnd = K.limb(scarf, { segments: 12, radial: 10, fill: scarfMat, outline: scarfInk, order: 3, edge: 0.012 });
+  const scarfR = () => collarR + 0.03;
+  scarfBand.update((t, out) => {
+    const a = mix(-1.45, 1.45, t);
+    return out.set(Math.sin(a) * scarfR(), 0.02 * (1 - Math.cos(a)), Math.cos(a) * scarfR() * 0.86);
+  }, t => 0.06 * (0.35 + 0.65 * smooth(0, 0.2, Math.min(t, 1 - t))));
+  const swingEnd = swing => scarfEnd.update((t, out) => out.set(0.16 + 0.05 * t + swing * t * t, -0.36 * t, scarfR() * 0.86 + 0.06 + 0.05 * t),
+    t => 0.05 - 0.008 * t);
+  swingEnd(0);
+  scarf.visible = false;
+  collar.add(scarf);
+
   // Tail in world space: the root follows the body, the tip mostly stays put when the cat leans.
-  const tailPts = [V(0.42, 0.42, -0.25), V(0.72, 0.28, -0.3), V(0.96, 0.36, -0.32), V(1.05, 0.56, -0.3),
-    V(1.12, 0.7, -0.28), V(1.3, 0.7, -0.26)];
+  const tailPts = [V(0.42, 0.42, -0.25), V(0.72, 0.24, -0.3), V(0.98, 0.3, -0.32), V(1.12, 0.52, -0.3),
+    V(1.13, 0.76, -0.28), V(1.02, 0.9, -0.26)];
   const tailSleep = [V(0.42, 0.12, -0.25), V(0.85, 0.1, -0.15), V(1.05, 0.1, 0.1), V(1.0, 0.1, 0.35),
     V(0.82, 0.1, 0.5), V(0.6, 0.1, 0.55)];
   // Annoyed: the tail lies out along the desk and its far half is lifted and slammed down.
   const tailThump = [V(0.42, 0.36, -0.25), V(0.7, 0.16, -0.24), V(0.94, 0.07, -0.14), V(1.12, 0.05, -0.02),
     V(1.28, 0.05, 0.06), V(1.42, 0.06, 0.1)];
-  const tailCurve = new THREE.CatmullRomCurve3(tailPts.map(q => q.clone()), false, 'catmullrom', 0.5);
+  // Lying, the tail leaves from the rump (this point, in sitting terms) and goes where the pose
+  // says (`lying.tail`: the points after the root, in body space).
+  const TAIL_ROOT_LIE = V(0.04, -0.16, -0.16);
+  // The tail itself is a chain of equal links, so it keeps its length whatever the pose: a pose
+  // only gives the shape it should take (`tailWant`). A bending wave runs out along it from the
+  // root, and each link follows its place with a lag that grows towards the tip, so the tip
+  // trails, overshoots and settles the way a real tail does.
+  const TAIL_N = 12, TAIL_LEN = 1.25, LINK = TAIL_LEN / TAIL_N;
+  const tailWant = new THREE.CatmullRomCurve3(tailPts.map(q => q.clone()), false, 'catmullrom', 0.5);
+  const tailCurve = new THREE.CatmullRomCurve3(Array.from({ length: TAIL_N + 1 }, () => V()), false, 'catmullrom', 0.5);
+  const chain = tailCurve.points.map(() => V()), chainPrev = chain.map(() => V()), chainGoal = chain.map(() => V());
+  let chainFresh = true;
+  const linkA = V(), linkB = V(), linkDir = V(), bendAxis = V(), bendQ = new THREE.Quaternion(), bendStep = new THREE.Quaternion();
   const tail = K.limb(K.scene, { segments: 28, radial: 14, fill: fur.tail, outline: rimMat, edge: 0.022, capStart: false });
   const attached = V(0, 0, 0), loose = V(0, 0, 0), tmpTail = V(0, 0, 0);
 
@@ -427,8 +847,10 @@
   const arms = [-1, 1].map(s => {
     // The outline only starts once the arm is clear of the chest, so the shoulder flows into the
     // body without a seam and the line draws in along the upper arm.
+    const line = { outer: false };
     const limb = K.limb(K.scene, { segments: 24, radial: 18, fill: fur.arms[s < 0 ? 0 : 1], outline: armRimMat, order: 20,
-      edge: t => mix(-0.03, 0.012, smooth(0.14, 0.42, t)) });
+      edge: t => line.outer ? 0.022 : mix(-0.03, 0.012, smooth(0.14, 0.42, t)) });
+    limb.line = line;
     const { paw, rim } = makePaw(K.scene, 20);
     // Shoulders sit inside the chest, so a hanging arm only shows below the middle of the body.
     return { s, limb, paw, rim, shoulderLocal: V(s * 0.27, 0.94, 0.22), shoulder: V(0, 0, 0),
@@ -437,9 +859,89 @@
 
   // Each arm is a cubic curve: the upper arm drops from the shoulder and bows out at the elbow,
   // the forearm comes down onto the paw from above. Thick and soft at the shoulder, slimmer
-  // forearm, a little fuller again at the wrist where it meets the paw.
+  // forearm, a little fuller again at the wrist.
+  const armTmp = V(0, 0, 0), armC = V(0, 0, 0), armQ = new THREE.Quaternion();
+  const PAW_H = 0.085;
   const armRadius = t => mix(0.135, 0.092, smooth(0, 0.72, t)) + 0.014 * smooth(0.8, 1, t);
-  function updateArm(arm, pawPos) {
+  // Lying, the foreleg is two bones of fixed length, so it bends at the elbow instead of
+  // stretching: the elbow goes down onto whatever the arm lies on and a little out to the side,
+  // and the forearm rises from there to the paw. For a paw further than the leg reaches, the
+  // shoulder blade slides forward (up to GLIDE) and then the leg straightens.
+  const UPPER = 0.44, FORE = 0.5, GLIDE = 0.36;
+  const armE = V(0, 0, 0), armU = V(0, 0, 0), armP = V(0, 0, 0), armO = V(0, 0, 0);
+  function lyingElbow(arm, a, b, w, out) {
+    const reach = UPPER + FORE;
+    let d = a.distanceTo(b);
+    armU.subVectors(b, a).normalize();
+    if (d > reach * 0.96) { a.addScaledVector(armU, Math.min(GLIDE, d - reach * 0.96) * w); d = a.distanceTo(b); }
+    d = Math.min(d, reach * 0.999);
+    const x = (UPPER * UPPER - FORE * FORE + d * d) / (2 * d), h = Math.sqrt(Math.max(0, UPPER * UPPER - x * x));
+    armO.copy(a).addScaledVector(armU, x);
+    armP.set(arm.s * 0.55, -1, -0.3);
+    armP.addScaledVector(armU, -armP.dot(armU)).normalize();
+    out.copy(armO).addScaledVector(armP, h);
+    // Never through what it lies on: lift the elbow round its circle until it rests on top.
+    const floor = (lying.floor ? lying.floor(out.x, out.z) : 0) + 0.08;
+    if (out.y < floor) {
+      armP.subVectors(out, armO);
+      armP.y += floor - out.y;
+      armP.addScaledVector(armU, -armP.dot(armU));
+      if (armP.lengthSq() > 1e-8) out.copy(armO).addScaledVector(armP.normalize(), h);
+    }
+    return out;
+  }
+  // `hang` (0..1): lying, how limp the wrist is (see below). `elbow`: lying, { at, k }, an elbow
+  // put down at `at` (world) on purpose, `k` how far. `aim`: lying, a paw
+  // turned on purpose, { toes, top, k } (world directions, `k` how far), such as a sole held up
+  // to you.
+  // The wrist is thicker than the paw is deep, so an arm that simply ends where the paw is would
+  // show its round end under the paw and round its toes. Instead the end is drawn back up the
+  // forearm just far enough that the front half of it (the back half is inside the arm) lies
+  // within the paw, fill in fill and outline in outline. Above the paw is fine: that is the arm
+  // coming down onto it. The paw stays where it was put, so the arm always runs into it.
+  const capDirs = [];
+  for (let i = 0; i < 24; i++) {
+    const z = (i + 0.5) / 24, r = Math.sqrt(1 - z * z), a = i * 2.39996;
+    capDirs.push(V(r * Math.cos(a), r * Math.sin(a), z));
+  }
+  const capQ = new THREE.Quaternion(), pawInv = new THREE.Quaternion(), capP = V(0, 0, 0);
+  const capZ = V(0, 0, 1), END_BACK = 0.14;
+  // How many of the end's front points stick out of the paw, with the end `k` back from `b`.
+  function capOutside(paw, b, d, k, r, edge) {
+    let n = 0;
+    for (const [rad, grow] of [[r, 0], [r + edge, 0.013]]) {
+      for (const dir of capDirs) {
+        capP.copy(dir).applyQuaternion(capQ).multiplyScalar(rad).addScaledVector(d, -k).add(b)
+          .sub(paw.position).applyQuaternion(pawInv);
+        // Back into the unit sphere the paw bean was made from (see pawGeo).
+        const z = capP.z / (paw.scale.z + grow), y = capP.y / (paw.scale.y + grow);
+        const x = capP.x / (paw.scale.x + grow) / (1 + 0.12 * z);
+        if (x * x + z * z + (y < 0 ? (y / 0.45) ** 2 : 0) > 1) n++;
+      }
+    }
+    return n;
+  }
+  function endInPaw(arm, b, d, r, edge) {
+    capQ.setFromUnitVectors(capZ, d);
+    pawInv.copy(arm.paw.quaternion).invert();
+    let best = 0, fewest = Infinity;
+    for (let k = 0; k <= END_BACK + 1e-6; k += 0.02) {
+      const n = capOutside(arm.paw, b, d, k, r, edge);
+      if (n === 0) {
+        // Then narrow it down, so the end slides smoothly as the paw moves.
+        let lo = Math.max(0, k - 0.02), hi = k;
+        if (k > 0) for (let i = 0; i < 6; i++) {
+          const mid = (lo + hi) / 2;
+          if (capOutside(arm.paw, b, d, mid, r, edge) === 0) hi = mid; else lo = mid;
+        }
+        return hi;
+      }
+      if (n < fewest) { fewest = n; best = k; }
+    }
+    return best;
+  }
+
+  function updateArm(arm, pawPos, hang = 0, elbow = null, aim = null) {
     attach(arm.shoulderLocal, arm.shoulder);
     arm.hand.copy(pawPos);
     const a = arm.shoulder, b = arm.hand;
@@ -452,21 +954,69 @@
       a.z + 0.06 + (b.z - a.z) * 0.25);
     arm.c2.set(b.x - (b.x - a.x) * 0.12, b.y + reach * 0.3, b.z - (b.z - a.z) * 0.18);
     const { c1, c2 } = arm;
-    arm.limb.update((t, out) => {
-      const u = 1 - t;
-      return out.set(
-        u * u * u * a.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * b.x,
-        u * u * u * a.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * b.y,
-        u * u * u * a.z + 3 * u * u * t * c1.z + 3 * u * t * t * c2.z + t * t * t * b.z);
-    }, armRadius);
+    // Lying, nothing holds the arm up but what it lies on. A paw resting on the keys (`hang` 0):
+    // a fairly straight arm out along them. A limp one (`hang` 1): the arm leaves the shoulder
+    // level, or rises if the paw is up, and the forearm drops onto the paw from above, so a paw
+    // over an edge hangs straight down off the wrist and one held over the chest flops over.
+    const w = lieAt(arm.shoulderLocal.y);
+    outlineOutside(arm.limb, w > 0.5, armRimMat, 19);
+    if (w > 0) {
+      // Through the elbow (the pose's, or the two bones'), leaving the shoulder along the upper
+      // arm and arriving along the forearm: control points 4/3 of the way to the elbow put the
+      // middle of the curve on it.
+      const e = lyingElbow(arm, a, b, w, armE);
+      if (elbow && elbow.k > 0) e.lerp(elbow.at, elbow.k);
+      c1.lerp(armC.subVectors(e, a).multiplyScalar(4 / 3).add(a), w);
+      c2.lerp(armC.subVectors(e, b).multiplyScalar(4 / 3).add(b), w);
+    }
+    // Sitting, a paw turned on purpose (held up to the mouth to wash) is reached from below: the
+    // elbow comes forward off the chest and the forearm rises along the toes into the wrist.
+    const held = aim ? aim.k * (1 - w) : 0;
+    if (held > 0) {
+      c1.z += 0.14 * held;
+      c2.lerp(armC.copy(aim.toes).normalize().multiplyScalar(-0.32 * reach).add(b), held);
+    }
     // The paw points the way the forearm travels, and sits just past the end of the arm.
     const yaw = Math.atan2(b.x - c2.x, b.z - c2.z);
     arm.paw.position.copy(b);
-    arm.paw.scale.set(0.135, 0.085, 0.13);
+    arm.paw.scale.set(0.135, PAW_H, 0.13);
     arm.paw.rotation.set(0, yaw, 0);
-    arm.rim.position.copy(b);
-    arm.rim.rotation.copy(arm.paw.rotation);
-    arm.rim.scale.set(0.149, 0.097, 0.144);
+    if (held > 0) arm.paw.quaternion.slerp(pawBasis(aim.toes, armQ, aim.top), held);
+    if (w > 0) {
+      // Off the end of the forearm, curled a little towards you so its toes show, and on past the
+      // wrist, so the arm runs into its heel instead of showing through the middle of it.
+      armTmp.subVectors(b, c2).normalize();
+      // Folded up, a limp wrist lets the paw drop forward and down off the end of the forearm.
+      if (elbow) armTmp.multiplyScalar(0.5).add(armC.set(0, -1, 0.6).multiplyScalar(hang));
+      else armTmp.z += 0.9 * hang;
+      arm.paw.quaternion.slerp(pawBasis(armTmp, armQ), w);
+      armTmp.normalize();
+      let past = 0.08;
+      if (aim && aim.k > 0) {
+        arm.paw.quaternion.slerp(pawBasis(aim.toes, armQ, aim.top), aim.k * w);
+        armTmp.lerp(aim.toes, aim.k).normalize();
+        // A turned paw hangs from the wrist by its heel and sits just in front of the arm's end,
+        // so the end of the arm never shows through it as a dark spot.
+        past = mix(0.08, 0.12, aim.k);
+        arm.paw.position.addScaledVector(armC.subVectors(K.camera.position, b).normalize(), 0.05 * aim.k * w);
+      }
+      arm.paw.position.addScaledVector(armTmp, past * w);
+    }
+    arm.rim.position.copy(arm.paw.position);
+    arm.rim.quaternion.copy(arm.paw.quaternion);
+    arm.rim.scale.copy(arm.paw.scale).addScalar(0.013);
+    const radius = w > 0 && hang > 0 ? t => armRadius(t) * (1 - 0.18 * hang * w * smooth(0.2, 0.6, t)) : armRadius;
+    const d = armTmp.subVectors(b, c2).normalize();
+    const k = endInPaw(arm, b, d, radius(1), arm.limb.line.outer ? 0.022 : 0.012);
+    const end = armE.copy(b).addScaledVector(d, -k);
+    c2.addScaledVector(d, -k);
+    arm.limb.update((t, out) => {
+      const u = 1 - t;
+      return out.set(
+        u * u * u * a.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * end.x,
+        u * u * u * a.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * end.y,
+        u * u * u * a.z + 3 * u * u * t * c1.z + 3 * u * t * t * c2.z + t * t * t * end.z);
+    }, radius);
   }
 
   // Space bar easter egg: the tail sweeps out past the hip, round the side and in over the near
@@ -481,12 +1031,16 @@
   }
 
   // `thump` blends in the annoyed pose, `lift` (0..1) raises its far half, `lash` swings it sideways.
-  // `reach` (0..1) blends in the space bar pat towards `reachTip`.
-  function updateTail(time, sway, sleep, thump = 0, lift = 0, lash = 0, reach = 0, reachTip = null) {
+  // `reach` (0..1) blends in the space bar pat towards `reachTip`. `lie` (0..1) blends in the
+  // lying pose, `wrap` (0..1) curls the tail round the front as when asleep (a cold winter cat).
+  // `sway` is how lively the wave is, `dt` the frame time for the lag.
+  function updateTail(time, sway, sleep, thump = 0, lift = 0, lash = 0, reach = 0, reachTip = null, lie = 0, wrap = 0, dt = 1 / 60) {
     body.updateMatrixWorld();
+    const want = tailWant.points;
     for (let i = 0; i < tailPts.length; i++) {
       const w = i / (tailPts.length - 1);
-      const local = tailCurve.points[i].lerpVectors(tailPts[i], tailSleep[i], sleep);
+      const local = want[i].lerpVectors(tailPts[i], tailSleep[i], Math.max(sleep, wrap));
+      if (lie > 0 && i === 0) local.lerp(TAIL_ROOT_LIE, lie);
       if (thump > 0) {
         tmpTail.copy(tailThump[i]);
         tmpTail.y += lift * 1.05 * w ** 1.4;
@@ -494,58 +1048,105 @@
         tmpTail.z += lash * 0.35 * w ** 1.5;
         local.lerp(tmpTail, thump);
       }
-      local.x += Math.sin(time * 1.6 + i * 0.7) * 0.04 * w * sway;
-      local.y += Math.sin(time * 1.3 + i * 0.9) * 0.05 * w * w * sway;
       attach(local, attached);
       loose.copy(local).add(HOME).addScaledVector(body.position, 0.3).addScaledVector(HOME, -0.3);
-      local.lerpVectors(attached, loose, K.smooth(0.1, 0.7, w));
+      local.lerpVectors(attached, loose, K.smooth(0.1, 0.7, w) * (1 - lie));
+      if (lie > 0 && i > 0 && lying.tail) {
+        tmpTail.copy(lying.tail[i - 1]).add(body.position);
+        local.lerp(tmpTail, lie * (i === 1 ? 0.6 : 1));
+      }
     }
     if (reach > 0 && reachTip) {
-      const pts = tailCurve.points;
-      reachTail(pts[0], reachTip);
+      reachTail(want[0], reachTip);
       // The point next to the root only bends part of the way, so the tail leaves the body smoothly.
-      for (let i = 1; i < pts.length; i++) pts[i].lerp(reachPath[i - 1], reach * (i === 1 ? 0.6 : 1));
+      for (let i = 1; i < want.length; i++) want[i].lerp(reachPath[i - 1], reach * (i === 1 ? 0.6 : 1));
+    }
+    tailWant.updateArcLengths();
+
+    // Where each link should be: the pose's shape at the tail's own length, bent by the wave. A
+    // slow sweep from side to side and a curl that grows towards the tip, both starting at the
+    // root and travelling out. Lying, the sweep is smaller and the tip does most of the moving.
+    const g = chainGoal, amp = sway * (1 - 0.45 * lie), tip = amp + 0.6 * lie * (1 - sleep);
+    tailWant.getPointAt(0, g[0]);
+    bendQ.identity();
+    for (let i = 1; i <= TAIL_N; i++) {
+      const w = i / TAIL_N;
+      tailWant.getPointAt((i - 1) / TAIL_N, linkA);
+      tailWant.getPointAt(w, linkB);
+      linkDir.subVectors(linkB, linkA).normalize();
+      bendQ.premultiply(bendStep.setFromAxisAngle(Y_UP, 0.05 * amp * (1 - 0.6 * lie) * Math.sin(time * 1.6 - i * 0.45)));
+      bendAxis.crossVectors(linkDir, Y_UP);
+      if (bendAxis.lengthSq() < 1e-4) bendAxis.set(0, 0, 1);
+      bendQ.premultiply(bendStep.setFromAxisAngle(bendAxis.normalize(), 0.06 * tip * w * w * Math.sin(time * 1.3 - i * 0.6)));
+      g[i].copy(g[i - 1]).addScaledVector(linkDir.applyQuaternion(bendQ), LINK);
+    }
+
+    // The links: pulled towards their places (harder near the root), carrying on with what speed
+    // they had, and held at their length from the link before, so the tail never stretches.
+    if (chainFresh || dt > 0.25 || chain[0].distanceToSquared(g[0]) > 0.04) {
+      chain.forEach((q, i) => { q.copy(g[i]); chainPrev[i].copy(g[i]); });
+      chainFresh = false;
+    } else {
+      const f = Math.min(dt * 60, 3), keep = Math.pow(0.86, f);
+      chain[0].copy(g[0]);
+      for (let i = 1; i <= TAIL_N; i++) {
+        const q = chain[i];
+        linkA.subVectors(q, chainPrev[i]).multiplyScalar(keep);
+        chainPrev[i].copy(q);
+        q.add(linkA).lerp(g[i], 1 - Math.pow(1 - mix(0.5, 0.17, i / TAIL_N), f));
+        q.sub(chain[i - 1]).setLength(LINK).add(chain[i - 1]);
+        if (q.y < 0.05) q.y = 0.05;
+      }
+    }
+    // Patting the space bar the tip has to land on the key itself, so there it follows the pose.
+    const pts = tailCurve.points;
+    for (let i = 0; i <= TAIL_N; i++) {
+      pts[i].copy(chain[i]);
+      if (reach > 0) pts[i].lerp(tailWant.getPointAt(i / TAIL_N, linkA), reach);
     }
     tail.update((t, out) => tailCurve.getPoint(t, out), t => mix(0.085, 0.068, t) + 0.014 * K.smooth(0.8, 1, t));
   }
 
-  // Coats, drawn from real cats: each has its own nose, inner ear, muzzle and bib colours, and the
-  // `eye` it most often has. `tabby` lists the stripe colour for coats that can be striped, and
-  // `striped` ones wear the stripes unless the pattern is set to solid. `point` and `points` give
-  // the dark mask, ears, legs and tail of colourpoint breeds; `curl` the waves of a rex coat in the
-  // `wave` colour, and `ears` scales the ears. `shade` is the soft volume shading; black stays a
-  // flat silhouette like the reference.
+  // Coats, drawn from real cats but drawn the way the black one is: flat fills with crisp edges,
+  // a few bold markings instead of texture, one outline colour (`rim`) round the whole cat and a
+  // warmer shade of it (`ink`, `arm`) for the lines inside. Each has its own nose, inner ear, muzzle
+  // and bib colours, and the `eye` it most often has. `tabby` lists the stripe colour for coats that
+  // can be striped, and `striped` ones wear the stripes unless the pattern is set to solid. `point`
+  // and `points` give the dark mask, ears, legs and tail of colourpoint breeds, and `ears` scales the
+  // ears. `cheek` is a faint pink flush on the pale coats (dark fur would only muddy it). `shade` is
+  // the soft volume shading of the 3D style; black stays a flat silhouette like the reference.
   const COATS = {
-    black: { fur: '#151515', ink: '#151515', rim: '#f6f3e8', arm: '#8a8984', paw: '#f7f6f0', toe: '#b9b7ae', whisker: '#dedcd4', eye: 'gold' },
+    black: { fur: '#151515', ink: '#151515', rim: '#f6f3e8', arm: '#8a8984', paw: '#1d1d1c', toe: '#4a4a46', whisker: '#dedcd4', eye: 'gold' },
     tuxedo: { fur: '#1a1a1a', ink: '#151515', lid: '#e4c25a', rim: '#f6f3e8', arm: '#8a8984', paw: '#f8f7f2', toe: '#bcbab2', whisker: '#e8e6de', eye: 'green',
       light: '#f8f7f2', muzzle: 1, tuxedo: 1, nose: '#e7a0a0', mouth: '#9a8f88', inner: '#3a2e2e', innerAmt: 1, shade: 0.25 },
-    orange: { fur: '#eda25a', ink: '#b8712f', lid: '#8a4a1f', rim: '#fff8ea', arm: '#b8712f', paw: '#fff6e8', toe: '#e0b991', whisker: '#fffaf0', eye: 'green',
-      light: '#fff1dc', muzzle: 1, bib: 1, nose: '#e58a78', mouth: '#a5643a', inner: '#f4b6a2', innerAmt: 1, shade: 0.55,
-      tabby: '#c46a2b', striped: true },
-    grey: { fur: '#8995a4', ink: '#5f6a78', lid: '#3d4450', rim: '#f6f5f0', arm: '#5f6a78', paw: '#f2f1ec', toe: '#bfc3c8', whisker: '#f4f2ea', eye: 'amber',
-      light: '#b8c1cc', muzzle: 0.8, bib: 0.6, nose: '#6d6f7d', mouth: '#56606d', inner: '#c9aeb4', innerAmt: 1, shade: 0.55,
-      tabby: '#5e6a79' },
-    white: { fur: '#fbf9f3', ink: '#c2b8a8', lid: '#8a7f72', rim: '#8b8172', arm: '#c9c1b2', paw: '#fbf9f3', toe: '#e0c9c2', whisker: '#b6ada0', eye: 'blue',
-      nose: '#f0a3a3', mouth: '#c99c94', inner: '#f6c3c3', innerAmt: 1, shade: 0.5 },
-    calico: { fur: '#fbf8f1', ink: '#c2b8a8', lid: '#6e5a4e', rim: '#8b8172', arm: '#c9c1b2', paw: '#fbf8f1', toe: '#e0c9c2', whisker: '#b6ada0', eye: 'gold',
-      patchA: '#e5964a', patchB: '#2b2522', calico: 1, nose: '#eea29a', mouth: '#b08a80', inner: '#f2bcb6', innerAmt: 1, shade: 0.5 },
-    // Seal point: cream body, dark brown mask, ears, legs, paws and tail.
-    siamese: { fur: '#f0e4cf', ink: '#8b6f5c', rim: '#8b7a68', arm: '#6e5444', paw: '#5a4033', toe: '#3b2a21', whisker: '#f3ece0', eye: 'blue',
-      point: '#4b3428', points: 1, nose: '#2f211b', mouth: '#24180f', inner: '#6d5244', innerAmt: 1, shade: 0.45 },
+    orange: { fur: '#f2a65e', ink: '#b86f33', lid: '#8a4a1f', rim: '#fff8ea', arm: '#c47a3a', paw: '#fff6e8', toe: '#e6bf98', whisker: '#fffaf0', eye: 'green',
+      light: '#fff1dc', muzzle: 1, bib: 1, nose: '#ef8a80', mouth: '#a5643a', inner: '#f7b9a8', innerAmt: 1, shade: 0.55,
+      tabby: '#d0752f', striped: true, cheek: 0.3 },
+    grey: { fur: '#9aa7b8', ink: '#6a7687', lid: '#3d4450', rim: '#f6f5f0', arm: '#6f7b8c', paw: '#f2f1ec', toe: '#c3c8ce', whisker: '#f4f2ea', eye: 'copper',
+      light: '#c9d1dc', muzzle: 1, bib: 0.6, nose: '#8a8494', mouth: '#5a6575', inner: '#d9b8bf', innerAmt: 1, shade: 0.55,
+      tabby: '#7b889a', cheek: 0.3 },
+    white: { fur: '#fbf9f3', ink: '#b3a594', lid: '#8a7f72', rim: '#8f7f6e', arm: '#bdb09f', paw: '#fbf9f3', toe: '#e6cfc8', whisker: '#b6ada0', eye: 'blue',
+      nose: '#f29ca0', mouth: '#c99c94', inner: '#f7bfc2', innerAmt: 1, shade: 0.5, cheek: 0.4 },
+    calico: { fur: '#fbf8f1', ink: '#b3a594', lid: '#6e5a4e', rim: '#8f7f6e', arm: '#bdb09f', paw: '#fbf8f1', toe: '#e6cfc8', whisker: '#b6ada0', eye: 'gold',
+      patchA: '#ee9c4f', patchB: '#3a302b', calico: 1, nose: '#f0a09a', mouth: '#b08a80', inner: '#f4bab4', innerAmt: 1, shade: 0.5, cheek: 0.35 },
+    // Seal point: cream body, dark brown mask, ears, boots and tail, each with a clean edge.
+    siamese: { fur: '#f3e8d6', ink: '#a48b76', rim: '#8f7a66', arm: '#a48b76', paw: '#5e4436', toe: '#3e2c23', pad: '#2f211b', whisker: '#f3ece0', eye: 'blue',
+      point: '#5a3f31', points: 1, nose: '#2f211b', mouth: '#24180f', inner: '#7a5c4c', innerAmt: 1, shade: 0.45 },
     // Seal bicolour: softer points, white inverted V on the face, white chest and mitts.
-    ragdoll: { fur: '#f5eee3', ink: '#a8927f', rim: '#8b8172', arm: '#a8927f', paw: '#fdfbf7', toe: '#ddd2c6', whisker: '#cfc4b6', eye: 'blue',
-      point: '#6f5242', points: 1, light: '#fdfbf7', muzzle: 1, tuxedo: 1, bib: 1, nose: '#e39b98', mouth: '#a07e70', inner: '#9a7466', innerAmt: 1, shade: 0.5 },
-    // Devon rex: big low-set ears and a short wavy coat, here in lilac.
-    devon: { fur: '#b3a8ad', ink: '#7f7479', lid: '#5b5156', rim: '#fbf9f6', arm: '#7f7479', paw: '#efeaec', toe: '#c3b9be', whisker: '#fbf9f6', eye: 'gold',
-      light: '#d9d1d5', muzzle: 0.8, wave: '#9a8f95', curl: 1, ears: 1.45, nose: '#d79a9e', mouth: '#7f7479', inner: '#e8b9bf', innerAmt: 1, shade: 0.5 },
+    ragdoll: { fur: '#f6efe4', ink: '#ab9583', rim: '#8f7f6e', arm: '#ab9583', paw: '#fdfbf7', toe: '#ddd2c6', whisker: '#cfc4b6', eye: 'blue',
+      point: '#7a5a48', points: 1, light: '#fdfbf7', muzzle: 1, tuxedo: 1, bib: 1, nose: '#ec9fa0', mouth: '#a07e70', inner: '#a8806f', innerAmt: 1, shade: 0.5,
+      cheek: 0.3 },
+    // Devon rex: big low-set ears and big eyes, here in a soft lilac.
+    devon: { fur: '#c6b8c3', ink: '#8f808b', lid: '#5b5156', rim: '#fbf9f6', arm: '#94858f', paw: '#f2edf0', toe: '#cdc2c8', whisker: '#fbf9f6', eye: 'gold',
+      light: '#e6dde3', muzzle: 1, ears: 1.45, nose: '#e0a0a8', mouth: '#7f7479', inner: '#f2bcc6', innerAmt: 1, shade: 0.5, cheek: 0.35 },
     // American shorthair: silver with black tabby stripes.
-    silver: { fur: '#c7ccd1', ink: '#7d838a', lid: '#3f444a', rim: '#fbfbf8', arm: '#7d838a', paw: '#f1f2f2', toe: '#b6bcc2', whisker: '#fbfbf8', eye: 'green',
-      light: '#f1f2f2', muzzle: 1, bib: 0.8, nose: '#c98a8a', mouth: '#6c7279', inner: '#e5b8bb', innerAmt: 1, shade: 0.55,
-      tabby: '#2e3136', striped: true },
+    silver: { fur: '#cfd4d9', ink: '#878d94', lid: '#3f444a', rim: '#fbfbf8', arm: '#8a9097', paw: '#f3f4f4', toe: '#bcc2c8', whisker: '#fbfbf8', eye: 'green',
+      light: '#f3f4f4', muzzle: 1, bib: 0.8, nose: '#d79395', mouth: '#6c7279', inner: '#eebcc0', innerAmt: 1, shade: 0.55,
+      tabby: '#50555c', striped: true, cheek: 0.3 },
     // Chinese li hua: brown mackerel tabby.
-    lihua: { fur: '#a98a62', ink: '#6e5640', lid: '#3d2f22', rim: '#fff8ec', arm: '#6e5640', paw: '#efe5d3', toe: '#c9b493', whisker: '#fff8ec', eye: 'green',
-      light: '#eadfca', muzzle: 1, bib: 0.7, nose: '#b8735f', mouth: '#5e4836', inner: '#d9a894', innerAmt: 1, shade: 0.55,
-      tabby: '#3d2f22', striped: true },
+    lihua: { fur: '#c29c6c', ink: '#80623f', lid: '#3d2f22', rim: '#fff8ec', arm: '#86684a', paw: '#f2e9d8', toe: '#d2bd9c', whisker: '#fff8ec', eye: 'green',
+      light: '#f0e5d0', muzzle: 1, bib: 0.7, nose: '#c27a66', mouth: '#5e4836', inner: '#e2ad98', innerAmt: 1, shade: 0.55,
+      tabby: '#6b5038', striped: true, cheek: 0.25 },
   };
   const EYES = { gold: '#dcb64a', green: '#93c255', blue: '#6eb2e6', amber: '#e59a32', copper: '#d9792f' };
   // Catchlight dots per style: [x (outer side +), y, radius].
@@ -557,22 +1158,37 @@
   const COLLARS = { red: '#d9483b', blue: '#4f8fd8', pink: '#ee8fb4', green: '#5fae6a' };
   // eye: 'auto' follows the coat; 'odd' is one blue and one gold eye.
   // style: '2d' is flat colour like a sticker; '3d' adds soft volume shading.
-  const look = { style: '2d', coat: 'black', pattern: 'auto', eye: 'auto', shine: 'classic', blush: false, whiskers: true, collar: 'none' };
+  // What the current coat brings beyond the materials: the resting cheek flush.
+  const coat = { cheek: 0 };
+  // `cable`, `board` and `opacity` are for the desk and the whole picture: the mouse cord, the
+  // keyboard's colours, and how see-through everything is (so the text under it shows).
+  const look = { style: '2d', coat: 'black', pattern: 'auto', eye: 'auto', shine: 'classic', blush: false, whiskers: true, collar: 'none',
+    cable: true, board: 'cream', opacity: 1, gloves: 'auto' };
+  // 手套颜色: the paws' colour and their toe creases. 'auto' is the coat's own (black paws on a
+  // black cat, white socks on a tuxedo).
+  const GLOVES = { white: { paw: '#f7f6f0', toe: '#b9b7ae' }, black: { paw: '#1d1d1c', toe: '#4a4a46' },
+    pink: { paw: '#f7c9d3', toe: '#d998a7' } };
   function setLook(o) {
     Object.assign(look, o);
     const c = COATS[look.coat] || COATS.black;
     const striped = c.tabby && (look.pattern === 'tabby' || (look.pattern === 'auto' && c.striped));
     const solid = look.style === '3d';
-    K.setFur({ ...c, dark: c.tabby || c.wave || c.fur, stripes: striped ? 1 : 0, shade: solid ? c.shade : 0 });
+    coat.cheek = c.cheek || 0;
+    K.setFur({ ...c, dark: c.tabby || c.fur, stripes: striped ? 1 : 0, shade: solid ? c.shade : 0 });
     // Big ears lean further out, set low and wide on the head as a Devon's are.
     for (const e of ears) placeEar(e, c.ears || 1);
     K.mouseProp.setStyle(look.style);
+    K.mouseProp.setCable(look.cable !== false);
+    K.keyboard.setTheme(look.board);
+    K.renderer.domElement.style.opacity = K.clamp(Number(look.opacity) || 1, 0.3, 1);
     chinLine.visible = !solid;
     chinMat.uniforms.uColor.value.set(c.ink || c.arm);
     rimMat.color.set(c.rim);
     armRimMat.color.set(c.arm);
-    pawMat.color.set(c.paw);
-    toeMat.color.set(c.toe);
+    const glove = GLOVES[look.gloves] || c;
+    pawMat.color.set(glove.paw);
+    padMat.color.set(c.pad || '#f19aa6');
+    toeMat.color.set(glove.toe);
     whiskerMat.color.set(c.whisker);
     noseMat.color.set(c.nose || c.fur);
     mouthMat.color.set(c.mouth || c.fur);
@@ -589,26 +1205,43 @@
       });
     }
     for (const w of whiskers) w.visible = look.whiskers;
-    collar.visible = look.collar in COLLARS;
-    if (collar.visible) collarMat.color.set(COLLARS[look.collar]);
+    if (look.collar in COLLARS) collarMat.color.set(COLLARS[look.collar]);
+    setOutfit(outfit.kind);
+  }
+
+  // `kind`: 'xmas', 'halloween', 'birthday', 'cny' or null. The scarf takes the collar's place.
+  function setOutfit(kind) {
+    outfit.kind = kind;
+    for (const [k, hat] of Object.entries(hats)) hat.visible = k === kind;
+    const wearsScarf = kind === 'cny', wearsCollar = look.collar in COLLARS && !wearsScarf;
+    scarf.visible = wearsScarf;
+    for (const part of collarParts) part.visible = wearsCollar;
+    collar.visible = wearsScarf || wearsCollar;
     placeCollar();
   }
 
   // The head rides on the bent neck; called after `bend` changes.
   const NECK = headPivot.position.clone();
   function placeHead() {
-    const w = spineWeight(NECK.y);
-    headPivot.position.set(NECK.x + bend.x * w, NECK.y * (1 - bend.squash), NECK.z + bend.z * w);
+    place(NECK.x, NECK.y, NECK.z, headPivot.position);
+    // Sitting, the head grows out of the chest with no line between them. Lying over the keys
+    // the head is in front of the body rising behind it, so its outline is drawn over the body
+    // too (as the ears' always is), and head and ears read as one shape against the back.
+    headRim.renderOrder = lying.amount > 0.5 ? 0.5 : -1;
   }
 
   K.cat = {
     body, home: HOME, headPivot, head, ears, eyes, whiskers, hind, arms, blushMat,
-    bend, bendBody, attach, placeHead, placeCollar,
+    bend, bendBody, attach, placeHead, placeCollar, lying, frameAt, lieAt, NECK_S: NECK.y,
     // World position of the tail tip (for the thump effects).
     tailTip: out => tailCurve.getPoint(1, out),
+    tailPoints: tailCurve.points,
     petMeshes: [headMesh, ...ears.map(e => e.mesh)],
     dragMeshes: [bodyMesh, tail.body, ...arms.flatMap(a => [a.limb.body, a.paw]), ...hind],
-    updateArm, updateTail, turnEar, setLook, look,
+    updateArm, updateTail, turnEar, setLook, look, coat, setYawn, setLick, kickHind, setOutfit, outfit, setLid,
+    swingScarf: swingEnd,
+    // The collar ring, the outline of the body, at a given height (for placing things on the chest).
+    radiusAt,
   };
   setLook({});
 })();

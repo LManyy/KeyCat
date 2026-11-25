@@ -50,11 +50,15 @@ final class SettingsWindow: NSObject, WKScriptMessageHandler, WKNavigationDelega
             for (key, value) in change { tune[key] = value }
             app.tune = tune
             app.pushOptions()
+        } else if let preset = body["preset"] as? [String: Any] {
+            // A personality replaces every saved value at once.
+            app.tune = preset
+            app.pushOptions()
         } else if body["reset"] != nil {
             app.tune = [:]
             app.pushOptions()
-        } else if let test = body["test"] as? String {
-            app.js(test == "annoy" ? "cat.annoyNow()" : "cat.curiousNow(3)")
+        } else if let test = body["test"] as? String, test.allSatisfy({ $0.isLetter && $0.isASCII }) {
+            app.main.js("cat.test('\(test)')")
         }
     }
 }

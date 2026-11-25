@@ -6,13 +6,23 @@ final class MenuAction: NSObject {
     init(_ run: @escaping () -> Void) { self.run = run }
 }
 
+let coatOptions = [("黑猫", "black"), ("奶牛猫", "tuxedo"), ("橘猫", "orange"), ("蓝灰猫", "grey"),
+                   ("白猫", "white"), ("三花猫", "calico"), ("暹罗猫", "siamese"), ("布偶猫", "ragdoll"),
+                   ("德文卷毛猫", "devon"), ("美短银虎斑", "silver"), ("狸花猫", "lihua")]
+
 extension AppDelegate {
+    /// Resizes every cat; the second keeps its place next to the main one.
     func applyScale(_ s: CGFloat, keepOrigin: Bool) {
         scale = s
         let size = CGSize(width: designSize.width * s, height: designSize.height * s)
-        var origin = panel.frame.origin
-        if !keepOrigin { origin = savedOrigin() ?? defaultOrigin(for: size) }
-        panel.setFrame(CGRect(origin: origin, size: size), display: true)
+        for cat in cats {
+            var origin = cat.panel.frame.origin
+            if !keepOrigin {
+                origin = savedOrigin(for: cat) ?? (cat.isMain ? defaultOrigin(for: size)
+                    : CGPoint(x: panel.frame.minX - size.width * 0.72, y: panel.frame.minY))
+            }
+            cat.panel.setFrame(CGRect(origin: origin, size: size), display: true)
+        }
     }
 
     func defaultOrigin(for size: CGSize) -> CGPoint {
@@ -20,17 +30,17 @@ extension AppDelegate {
         return CGPoint(x: area.maxX - size.width - 20, y: area.minY)
     }
 
-    func savedOrigin() -> CGPoint? {
-        guard let x = defaults.object(forKey: "originX") as? Double,
-              let y = defaults.object(forKey: "originY") as? Double else { return nil }
+    func savedOrigin(for cat: CatPanel) -> CGPoint? {
+        guard let x = defaults.object(forKey: cat.prefix + "originX") as? Double,
+              let y = defaults.object(forKey: cat.prefix + "originY") as? Double else { return nil }
         let p = CGPoint(x: x, y: y)
         let probe = CGRect(origin: p, size: CGSize(width: 80, height: 80))
         return NSScreen.screens.contains { $0.frame.intersects(probe) } ? p : nil
     }
 
-    func saveOrigin() {
-        defaults.set(Double(panel.frame.origin.x), forKey: "originX")
-        defaults.set(Double(panel.frame.origin.y), forKey: "originY")
+    func saveOrigin(_ cat: CatPanel) {
+        defaults.set(Double(cat.panel.frame.origin.x), forKey: cat.prefix + "originX")
+        defaults.set(Double(cat.panel.frame.origin.y), forKey: cat.prefix + "originY")
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -38,45 +48,38 @@ extension AppDelegate {
         buildMenu(menu)
     }
 
-    func showMenu(_ event: NSEvent) {
+    func showMenu(_ event: NSEvent, in view: NSView) {
         let menu = NSMenu()
         buildMenu(menu)
-        NSMenu.popUpContextMenu(menu, with: event, for: webView)
+        NSMenu.popUpContextMenu(menu, with: event, for: view)
     }
 
+    /// Things to do first, then the settings in three groups (the cat, the desk, its habits), then
+    /// window and app items. Same order and wording as the Windows tray.
     func buildMenu(_ menu: NSMenu) {
-        // Off is the flat 2D sticker look; on adds soft volume shading.
-        menu.addItem(toggle("立体效果（3D）", style == "3d") { $0.style = $0.style == "3d" ? "2d" : "3d" })
-        menu.addItem(submenu("毛色", [("黑猫", "black"), ("奶牛猫", "tuxedo"), ("橘猫", "orange"), ("蓝灰猫", "grey"),
-                                      ("白猫", "white"), ("三花猫", "calico"), ("暹罗猫", "siamese"), ("布偶猫", "ragdoll"),
-                                      ("德文卷毛猫", "devon"), ("美短银虎斑", "silver"), ("狸花猫", "lihua")], selected: coat) { $0.coat = $1 })
-        // Only coats whose stripes would show get the choice; black and white stay plain.
-        if coat == "orange" || coat == "grey" {
-            let striped = pattern == "tabby" || (pattern == "auto" && coat == "orange")
-            menu.addItem(submenu("花纹", [("纯色", "solid"), ("虎斑条纹", "tabby")],
-                                 selected: striped ? "tabby" : "solid") { $0.pattern = $1 })
-        }
-        let looks = NSMenuItem(title: "外观", action: nil, keyEquivalent: "")
-        let lookMenu = NSMenu()
-        lookMenu.addItem(submenu("眼睛颜色", [("跟随毛色", "auto"), ("金色", "gold"), ("绿色", "green"), ("蓝色", "blue"),
-                                              ("琥珀色", "amber"), ("鸳鸯眼（一蓝一金）", "odd")],
-                                 selected: eyeColor) { $0.eyeColor = $1 })
-        lookMenu.addItem(submenu("眼睛高光", [("无", "none"), ("经典", "classic"), ("闪亮", "sparkle")],
-                                 selected: eyeShine) { $0.eyeShine = $1 })
-        lookMenu.addItem(submenu("项圈", [("无", "none"), ("红色铃铛", "red"), ("蓝色铃铛", "blue"), ("粉色铃铛", "pink"),
-                                          ("绿色铃铛", "green")], selected: collar) { $0.collar = $1 })
-        lookMenu.addItem(toggle("腮红", blush) { $0.blush.toggle() })
-        lookMenu.addItem(toggle("胡须", whiskers) { $0.whiskers.toggle() })
-        looks.submenu = lookMenu
-        menu.addItem(looks)
-        menu.addItem(submenu("大小", [("特小", 0.5), ("小", 0.7), ("中", 0.9), ("大", 1.1), ("特大", 1.35)] as [(String, CGFloat)],
-                             selected: scale) { $0.applyScale($1, keepOrigin: true) })
-        menu.addItem(submenu("多久睡着", [("30 秒", 30), ("1 分钟", 60), ("3 分钟", 180), ("10 分钟", 600), ("不睡", 0)],
-                             selected: sleepAfter) { $0.sleepAfter = $1 })
+        menu.addItem(toggle(pomodoro ? "结束番茄钟" : "开始番茄钟", pomodoro) { $0.pomodoro.toggle() })
+        menu.addItem(item("今日小结…") { $0.stats.show() })
+        menu.addItem(item("拍一张动图（3 秒）") { $0.main.js("cat.record(3)") })
+        menu.addItem(.separator())
+        menu.addItem(group("外观", lookItems()))
+        menu.addItem(group("桌面", [
+            submenu("键盘颜色", [("奶白", "cream"), ("黑灰", "dark"), ("樱粉", "pink"), ("薄荷", "mint")],
+                    selected: keyboardColor) { $0.keyboardColor = $1 },
+            toggle("鼠标线", mouseCable) { $0.mouseCable.toggle() },
+            toggle("桌上的杯子（它会推下去）", cup) { $0.cup.toggle() },
+            submenu("透明度", [("不透明", 1.0), ("85%", 0.85), ("70%", 0.7), ("55%", 0.55)] as [(String, Double)],
+                    selected: opacity) { $0.opacity = $1 },
+        ]))
+        menu.addItem(group("习性", [
+            submenu("多久睡着", [("30 秒", 30), ("1 分钟", 60), ("3 分钟", 180), ("10 分钟", 600), ("不睡", 0)],
+                    selected: sleepAfter) { $0.sleepAfter = $1 },
+            toggle("声音（摸它时呼噜）", sound) { $0.sound.toggle() },
+            item("调节反应…") { $0.settings.show() },
+        ]))
+        menu.addItem(secondCatMenu())
+        menu.addItem(.separator())
         menu.addItem(toggle("隐私模式（不显示键名）", privacy) { $0.privacy.toggle() })
         menu.addItem(toggle("鼠标穿透（点击直接落到下层窗口）", clickThrough) { $0.clickThrough.toggle() })
-        menu.addItem(item("调节反应…") { $0.settings.show() })
-        menu.addItem(.separator())
         menu.addItem(item("回到右下角") { $0.resetPosition() })
         menu.addItem(item(panel.isVisible ? "隐藏" : "显示") { $0.toggleVisible() })
         menu.addItem(.separator())
@@ -88,6 +91,54 @@ extension AppDelegate {
         menu.addItem(updateItem())
         menu.addItem(.separator())
         menu.addItem(item("退出 KeyCat") { _ in NSApp.terminate(nil) })
+    }
+
+    /// The cat itself: coat and size first, then the details.
+    private func lookItems() -> [NSMenuItem] {
+        var items = [submenu("毛色", coatOptions, selected: coat) { $0.coat = $1 }]
+        // Only coats whose stripes would show get the choice; black and white stay plain.
+        if coat == "orange" || coat == "grey" {
+            let striped = pattern == "tabby" || (pattern == "auto" && coat == "orange")
+            items.append(submenu("花纹", [("纯色", "solid"), ("虎斑条纹", "tabby")],
+                                 selected: striped ? "tabby" : "solid") { $0.pattern = $1 })
+        }
+        items += [
+            submenu("大小", [("特小", 0.5), ("小", 0.7), ("中", 0.9), ("大", 1.1), ("特大", 1.35)] as [(String, CGFloat)],
+                    selected: scale) { $0.applyScale($1, keepOrigin: true) },
+            // Off is the flat 2D sticker look; on adds soft volume shading.
+            toggle("立体效果（3D）", style == "3d") { $0.style = $0.style == "3d" ? "2d" : "3d" },
+            .separator(),
+            submenu("眼睛颜色", [("跟随毛色", "auto"), ("金色", "gold"), ("绿色", "green"), ("蓝色", "blue"),
+                                 ("琥珀色", "amber"), ("鸳鸯眼（一蓝一金）", "odd")], selected: eyeColor) { $0.eyeColor = $1 },
+            submenu("眼睛高光", [("无", "none"), ("经典", "classic"), ("闪亮", "sparkle")], selected: eyeShine) { $0.eyeShine = $1 },
+            submenu("手套颜色", [("跟随毛色", "auto"), ("白色", "white"), ("黑色", "black"), ("粉色", "pink")],
+                    selected: gloves) { $0.gloves = $1 },
+            submenu("项圈", [("无", "none"), ("红色铃铛", "red"), ("蓝色铃铛", "blue"), ("粉色铃铛", "pink"),
+                             ("绿色铃铛", "green")], selected: collar) { $0.collar = $1 },
+            toggle("腮红", blush) { $0.blush.toggle() },
+            toggle("胡须", whiskers) { $0.whiskers.toggle() },
+            toggle("节日装扮", festival) { $0.festival.toggle() },
+        ]
+        return items
+    }
+
+    private func group(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for i in items { sub.addItem(i) }
+        parent.submenu = sub
+        return parent
+    }
+
+    private func secondCatMenu() -> NSMenuItem {
+        let parent = NSMenuItem(title: "第二只猫", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.addItem(toggle("陪着它", secondCat) { $0.setSecondCat(!$0.secondCat) })
+        sub.addItem(submenu("它的毛色", coatOptions, selected: coat2) { $0.coat2 = $1 })
+        sub.addItem(submenu("怎么相处", [("一起玩（各有键盘鼠标，会互相打闹）", "play"), ("分工（一只打字，一只管鼠标）", "split")],
+                            selected: pairMode) { $0.pairMode = $1 })
+        parent.submenu = sub
+        return parent
     }
 
     /// Same wording as the Windows tray. 重启 swaps the new app in on the way out (applicationWillTerminate).
@@ -146,13 +197,16 @@ extension AppDelegate {
     @objc func runMenuAction(_ sender: NSMenuItem) { (sender.representedObject as? MenuAction)?.run() }
 
     func resetPosition() {
-        defaults.removeObject(forKey: "originX")
-        defaults.removeObject(forKey: "originY")
+        for cat in cats {
+            defaults.removeObject(forKey: cat.prefix + "originX")
+            defaults.removeObject(forKey: cat.prefix + "originY")
+        }
         applyScale(scale, keepOrigin: false)
     }
 
     func toggleVisible() {
-        if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() }
+        let show = !panel.isVisible
+        for cat in cats { if show { cat.panel.orderFrontRegardless() } else { cat.panel.orderOut(nil) } }
     }
 
     func openPrivacy() {
